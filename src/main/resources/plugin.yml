@@ -9,13 +9,25 @@ commands:
   sneakydiagnostics:
     aliases: [diagnostics]
     description: Collect server diagnostics
-    usage: /<command> entities <start [world]|status|stop>
-    permission: sneakydiagnostics.entities
+    usage: /<command> <entities|timeline|scheduler|all> <start|status|stop>
   entitycensus:
     description: Collect a loaded-entity census (compatibility command)
-    usage: /<command> <start [world]|status|stop>
+    usage: /<command> <start [world] [seconds]|resume [seconds]|status|stop>
     permission: sneaky.entitycensus
 permissions:
+  sneakydiagnostics.all:
+    description: Collect and control all diagnostics together
+    default: op
+    children:
+      sneakydiagnostics.entities: true
+      sneakydiagnostics.timeline: true
+      sneakydiagnostics.scheduler: true
+  sneakydiagnostics.timeline:
+    description: Collect and control tick timeline reports
+    default: op
+  sneakydiagnostics.scheduler:
+    description: Collect and control scheduler snapshot reports
+    default: op
   sneakydiagnostics.entities:
     description: Collect and control entity census reports
     default: op

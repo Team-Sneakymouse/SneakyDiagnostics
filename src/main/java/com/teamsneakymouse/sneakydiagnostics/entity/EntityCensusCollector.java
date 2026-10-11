@@ -1,171 +1,213 @@
 package com.teamsneakymouse.sneakydiagnostics.entity;
 
-import com.google.gson.GsonBuilder;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
+import com.teamsneakymouse.sneakydiagnostics.capture.CaptureContext;
+import com.teamsneakymouse.sneakydiagnostics.capture.DiagnosticCollector;
+import com.teamsneakymouse.sneakydiagnostics.capture.ReportSink;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.logging.Level;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.World;
-import org.bukkit.command.Command;
-import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
-import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
-public final class EntityCensusCollector implements AutoCloseable {
-    static final int MAX_ENTITIES = 100_000;
-    static final int MAX_CHUNKS = 30_000;
-    static final long MAX_DURATION_NANOS = 120_000_000_000L;
+/** Bounded incremental census. Pause keeps the traversal cursor; each segment writes detached samples. */
+public final class EntityCensusCollector implements DiagnosticCollector {
+    static final int MAX_ENTITIES = 100_000, MAX_CHUNKS = 30_000, MAX_CAPTURE_ENTITIES = 500_000;
     static final long SLICE_BUDGET_NANOS = 2_000_000L;
-    private final ExecutorService writer = Executors.newSingleThreadExecutor(r -> {
-        var thread = new Thread(r, "SneakyDiagnostics-entity-report");
-        thread.setDaemon(true);
-        return thread;
-    });
-    private volatile boolean writing;
+    private final Plugin plugin;
+    private final ReportSink reports;
+    private final Environment environment;
     private Scan scan;
 
-    private final JavaPlugin plugin;
+    interface Environment {
+        World world(UUID id);
+        Collection<? extends Player> players();
+        int currentTick();
+        double averageTickTime();
+        BukkitTask repeat(Runnable task);
+    }
 
-    public EntityCensusCollector(JavaPlugin plugin) {
+    public EntityCensusCollector(Plugin plugin, ReportSink reports) {
+        this(plugin, reports, new Environment() {
+            @Override public World world(UUID id) { return Bukkit.getWorld(id); }
+            @Override public Collection<? extends Player> players() { return Bukkit.getOnlinePlayers(); }
+            @Override public int currentTick() { return Bukkit.getCurrentTick(); }
+            @Override public double averageTickTime() { return Bukkit.getAverageTickTime(); }
+            @Override public BukkitTask repeat(Runnable task) { return Bukkit.getScheduler().runTaskTimer(plugin, task, 1, 1); }
+        });
+    }
+
+    EntityCensusCollector(Plugin plugin, ReportSink reports, Environment environment) {
         this.plugin = plugin;
+        this.reports = reports;
+        this.environment = environment;
+    }
+    @Override public String name() { return "entities"; }
+    @Override public boolean active() { return scan != null && scan.running; }
+    @Override public boolean busy() { return active() || reports.busy(name()); }
+    public boolean resumable() { return scan != null && !scan.running; }
+    @Override public String status() {
+        if (reports.busy(name())) return "Writing report";
+        if (scan == null) return "Idle";
+        return (scan.running ? "Collecting " : "Paused; resume available for ") + scan.context.id()
+                + ": " + scan.seen.size() + " unique attempts, segment " + scan.segment;
     }
 
-    @Override public void close() {
-        if (scan != null) scan.finish("plugin_disable");
-        writer.shutdown();
+    @Override public void start(CaptureContext context, List<World> worlds) {
+        if (busy()) throw new IllegalStateException("Entity census is busy");
+        scan = new Scan(context, worlds);
+        scan.begin(context.seconds());
     }
 
-    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!sender.hasPermission("sneakydiagnostics.entities") && !sender.hasPermission("sneaky.entitycensus")) {
-            sender.sendMessage("You do not have permission to collect an entity census.");
-            return true;
+    public void resume(int seconds) {
+        if (busy() || !resumable()) throw new IllegalStateException("No paused census ready to resume");
+        scan.begin(seconds);
+    }
+
+    @Override public void stop(String reason) {
+        if (active()) scan.finish(reason);
+        if (reason.equals("plugin_disable") || reason.equals("start_error")) scan = null;
+    }
+
+    private static final class Coverage {
+        final String world;
+        int snapshotChunks = -1, visitedChunks, completedChunks, skippedChunks;
+        boolean snapshotAvailable;
+        long attemptedEntities, sampledEntities;
+        Coverage(String world) { this.world = world; }
+        CoverageRow row() {
+            return new CoverageRow(world, snapshotAvailable, snapshotChunks, visitedChunks, completedChunks, skippedChunks,
+                    snapshotChunks < 0 ? -1 : snapshotChunks - visitedChunks,
+                    visitedChunks - completedChunks - skippedChunks, attemptedEntities, sampledEntities);
         }
-        String usage = command.getName().equalsIgnoreCase("entitycensus") ? "/entitycensus" : "/" + label + " entities";
-        String action = args.length == 0 ? "status" : args[0].toLowerCase(Locale.ROOT);
-        switch (action) {
-            case "start" -> {
-                if (scan != null || writing) { sender.sendMessage("A census or report write is already in progress."); break; }
-                if (args.length > 2) { sender.sendMessage("Usage: " + usage + " start [world]"); break; }
-                List<World> worlds;
-                if (args.length == 2) {
-                    World world = Bukkit.getWorld(args[1]);
-                    if (world == null) { sender.sendMessage("Unknown or unloaded world: " + args[1]); break; }
-                    worlds = List.of(world);
-                } else worlds = Bukkit.getWorlds();
-                scan = new Scan(worlds);
-                scan.task = Bukkit.getScheduler().runTaskTimer(plugin, scan, 1, 1);
-                sender.sendMessage("Census started. Loaded chunks only, 2 ms target per tick, 120-second limit. Report path is logged on completion.");
-            }
-            case "stop" -> {
-                if (scan == null) sender.sendMessage("No census running.");
-                else { scan.finish("manual_stop"); sender.sendMessage("Stopped; partial report queued."); }
-            }
-            case "status" -> sender.sendMessage(scan != null ? "Collecting: " + scan.samples.size()
-                    + " entities, " + scan.visitedChunks + " chunks visited." : writing ? "Writing report." : "Idle.");
-            default -> sender.sendMessage("Usage: " + usage + " <start [world]|status|stop>");
-        }
-        return true;
     }
-
-    public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (!sender.hasPermission("sneakydiagnostics.entities") && !sender.hasPermission("sneaky.entitycensus")) return List.of();
-        if (args.length == 1) return List.of("start", "status", "stop").stream()
-                .filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
-        if (args.length == 2 && args[0].equalsIgnoreCase("start")) return Bukkit.getWorlds().stream()
-                .map(World::getName).filter(s -> s.startsWith(args[1])).toList();
-        return List.of();
-    }
+    record CoverageRow(String world, boolean snapshotAvailable, int snapshotChunks, int visitedChunks, int completedChunks, int skippedChunks,
+                       int unvisitedChunks, int partialChunks, long attemptedEntities, long sampledEntities) {}
 
     private final class Scan implements Runnable {
-        final long startedNanos = System.nanoTime();
-        final String startedAt = Instant.now().toString();
-        final int startTick = Bukkit.getCurrentTick();
-        final double startMspt = Bukkit.getAverageTickTime();
-        final Iterator<World> worlds;
+        final CaptureContext context;
+        final List<World> worlds;
+        final List<Coverage> coverage;
         final List<EntitySample> samples = new ArrayList<>();
         final Set<UUID> seen = new HashSet<>();
         Chunk[] chunks = new Chunk[0];
         Entity[] entities = new Entity[0];
         World currentWorld;
-        int chunkIndex, entityIndex, visitedChunks, skippedChunks, invalidEntities, errors, duplicateEntities;
-        long totalSliceNanos, maxSliceNanos;
-        int slices;
-        boolean finished;
+        Coverage currentCoverage;
+        Chunk currentChunk;
+        int worldIndex, chunkIndex, entityIndex, segment;
+        int visitedChunks, skippedChunks, invalidEntities, errors, duplicateEntities, attemptedEntities;
+        long totalSliceNanos, maxSliceNanos, segmentStartedNanos;
+        int slices, seconds, startTick;
+        String startedAt;
+        double startMspt;
+        boolean running;
         BukkitTask task;
 
-        Scan(List<World> worlds) { this.worlds = List.copyOf(worlds).iterator(); }
+        Scan(CaptureContext context, List<World> worlds) {
+            this.context = context;
+            this.worlds = List.copyOf(worlds);
+            coverage = worlds.stream().map(world -> new Coverage(world.getName())).toList();
+        }
+
+        void begin(int seconds) {
+            this.seconds = seconds;
+            segment++;
+            segmentStartedNanos = System.nanoTime();
+            startedAt = Instant.now().toString();
+            startTick = environment.currentTick();
+            startMspt = environment.averageTickTime();
+            visitedChunks = skippedChunks = invalidEntities = errors = duplicateEntities = attemptedEntities = slices = 0;
+            totalSliceNanos = maxSliceNanos = 0;
+            running = true;
+            try { task = environment.repeat(this); }
+            catch (RuntimeException e) { running = false; throw e; }
+        }
 
         @Override public void run() {
             long begin = System.nanoTime();
             String completion = null;
             try {
-                if (begin - startedNanos >= MAX_DURATION_NANOS) { completion = "timeout"; return; }
+                if (begin - segmentStartedNanos >= seconds * 1_000_000_000L) { completion = "timeout"; return; }
+                if (currentChunk != null && (environment.world(currentWorld.getUID()) != currentWorld
+                        || !currentChunk.isLoaded() || !currentChunk.isEntitiesLoaded())) {
+                    currentCoverage.skippedChunks++;
+                    skippedChunks++;
+                    currentChunk = null;
+                    entities = new Entity[0];
+                    entityIndex = 0;
+                }
                 List<EntitySample.Human> humans = new ArrayList<>();
                 Set<UUID> humanIds = new HashSet<>();
-                for (Player player : Bukkit.getOnlinePlayers()) {
+                for (Player player : environment.players()) {
                     if (player.hasMetadata("NPC")) continue;
                     var location = player.getLocation();
                     humanIds.add(player.getUniqueId());
-                    humans.add(new EntitySample.Human(player.getUniqueId(), player.getWorld().getName(),
-                            location.getX(), location.getZ()));
+                    humans.add(new EntitySample.Human(player.getUniqueId(), player.getWorld().getName(), location.getX(), location.getZ()));
                 }
                 int examinedThisTick = 0, chunksThisTick = 0;
                 while (System.nanoTime() - begin < SLICE_BUDGET_NANOS && examinedThisTick < 200 && chunksThisTick < 8) {
-                    if (seen.size() >= MAX_ENTITIES) { completion = "entity_limit"; break; }
+                    if (seen.size() >= MAX_CAPTURE_ENTITIES) { completion = "capture_entity_limit"; break; }
+                    if (attemptedEntities >= MAX_ENTITIES) { completion = "entity_limit"; break; }
                     if (entityIndex < entities.length) {
                         Entity entity = entities[entityIndex++];
                         examinedThisTick++;
                         if (!entity.isValid()) { invalidEntities++; continue; }
                         if (!seen.add(entity.getUniqueId())) { duplicateEntities++; continue; }
+                        attemptedEntities++;
+                        currentCoverage.attemptedEntities++;
                         try {
-                            samples.add(EntitySample.read(entity, humans, humanIds,
-                                    (System.nanoTime() - startedNanos) / 1_000_000));
+                            samples.add(EntitySample.read(entity, humans, humanIds, context.offsetMillis()));
+                            currentCoverage.sampledEntities++;
                         } catch (RuntimeException e) {
                             errors++;
-                            if (errors == 1) plugin.getLogger().log(java.util.logging.Level.WARNING, "[ENTITY-CENSUS] Entity read failed", e);
+                            if (errors == 1) plugin.getLogger().log(Level.WARNING, "Entity read failed", e);
                         }
                         continue;
+                    }
+                    if (currentChunk != null) {
+                        currentCoverage.completedChunks++;
+                        currentChunk = null;
                     }
                     entities = new Entity[0];
                     entityIndex = 0;
                     if (chunkIndex >= chunks.length) {
-                        if (!worlds.hasNext()) { completion = "completed"; break; }
-                        currentWorld = worlds.next();
-                        // This one API call is not preemptible; its cost is included in slice telemetry.
-                        chunks = Bukkit.getWorld(currentWorld.getUID()) == currentWorld
-                                ? currentWorld.getLoadedChunks() : new Chunk[0];
+                        if (worldIndex >= worlds.size()) { completion = "completed"; break; }
+                        currentWorld = worlds.get(worldIndex);
+                        currentCoverage = coverage.get(worldIndex++);
+                        // Snapshot creation is not preemptible; its cost is included in slice telemetry.
+                        currentCoverage.snapshotAvailable = environment.world(currentWorld.getUID()) == currentWorld;
+                        chunks = currentCoverage.snapshotAvailable ? currentWorld.getLoadedChunks() : new Chunk[0];
+                        currentCoverage.snapshotChunks = chunks.length;
                         chunkIndex = 0;
                         continue;
                     }
                     if (visitedChunks >= MAX_CHUNKS) { completion = "chunk_limit"; break; }
                     Chunk chunk = chunks[chunkIndex++];
                     visitedChunks++;
+                    currentCoverage.visitedChunks++;
                     chunksThisTick++;
-                    if (Bukkit.getWorld(currentWorld.getUID()) != currentWorld || !chunk.isLoaded() || !chunk.isEntitiesLoaded()) {
+                    if (environment.world(currentWorld.getUID()) != currentWorld || !chunk.isLoaded() || !chunk.isEntitiesLoaded()) {
                         skippedChunks++;
+                        currentCoverage.skippedChunks++;
                         continue;
                     }
-                    // No getChunkAt, load, chunk tickets, or world-wide entity scan.
+                    currentChunk = chunk;
+                    // No getChunkAt, load, tickets, or world-wide entity scan.
                     entities = chunk.getEntities();
                 }
             } catch (RuntimeException e) {
-                plugin.getLogger().log(java.util.logging.Level.SEVERE, "[ENTITY-CENSUS] Scan failed", e);
+                plugin.getLogger().log(Level.SEVERE, "Entity scan failed", e);
                 completion = "scan_error";
             } finally {
                 long elapsed = System.nanoTime() - begin;
@@ -177,21 +219,25 @@ public final class EntityCensusCollector implements AutoCloseable {
         }
 
         void finish(String reason) {
-            if (finished) return;
-            finished = true;
+            if (!running) return;
+            running = false;
             if (task != null) task.cancel();
+            task = null;
             List<EntitySample> detached = List.copyOf(samples);
-            Map<String, Object> report = new LinkedHashMap<>();
-            report.put("schemaVersion", 1);
+            var report = reports.header(name(), context, reason, segment);
+            boolean canResume = Set.of("timeout", "manual_stop", "entity_limit", "chunk_limit").contains(reason)
+                    && seen.size() < MAX_CAPTURE_ENTITIES;
             report.put("startedAt", startedAt);
-            report.put("finishedAt", Instant.now().toString());
-            report.put("reason", reason);
-            report.put("complete", reason.equals("completed") && errors == 0 && skippedChunks == 0);
-            report.put("serverVersion", Bukkit.getVersion());
-            report.put("elapsedMillis", (System.nanoTime() - startedNanos) / 1_000_000);
-            report.put("serverTicks", Bukkit.getCurrentTick() - startTick);
+            report.put("resumable", canResume);
+            report.put("complete", reason.equals("completed") && coverage.stream().allMatch(row -> row.snapshotAvailable && row.skippedChunks == 0)
+                    && coverage.stream().mapToLong(row -> row.attemptedEntities).sum()
+                    == coverage.stream().mapToLong(row -> row.sampledEntities).sum());
+            report.put("coverage", coverage.stream().map(Coverage::row).toList());
+            report.put("elapsedMillis", (System.nanoTime() - segmentStartedNanos) / 1_000_000);
+            report.put("segmentDurationSeconds", seconds);
+            report.put("serverTicks", environment.currentTick() - startTick);
             report.put("startMspt", startMspt);
-            report.put("endMspt", Bukkit.getAverageTickTime());
+            report.put("endMspt", environment.averageTickTime());
             report.put("visitedChunks", visitedChunks);
             report.put("skippedChunks", skippedChunks);
             report.put("invalidEntities", invalidEntities);
@@ -202,29 +248,25 @@ public final class EntityCensusCollector implements AutoCloseable {
             report.put("maxSliceNanos", maxSliceNanos);
             report.put("entityCount", detached.size());
             report.put("uniqueEntitiesAttempted", seen.size());
-            report.put("limits", Map.of("entities", MAX_ENTITIES, "chunks", MAX_CHUNKS,
-                    "durationSeconds", 120, "targetSliceMillis", 2, "entitiesPerTick", 200, "chunksPerTick", 8));
-            report.put("notes", "Incremental census, not a simultaneous snapshot. Nearby humans use horizontal distance. "
-                    + "Owner hints are namespaces/metadata providers, not proven creators. Tracking counts are current subscriptions, not CPU cost. "
+            report.put("limits", Map.of("entitiesPerSegment", MAX_ENTITIES, "chunksPerSegment", MAX_CHUNKS,
+                    "entitiesPerCapture", MAX_CAPTURE_ENTITIES, "durationSeconds", seconds,
+                    "targetSliceMillis", 2, "entitiesPerTick", 200, "chunksPerTick", 8));
+            report.put("notes", "Incremental census, not a simultaneous snapshot. This file contains only this segment's entities/groups/sections; "
+                    + "coverage and uniqueEntitiesAttempted are cumulative across resumed segments. complete describes traversal coverage across those segments. "
+                    + "snapshotChunks=-1 means world not reached; unvisited/partial chunks expose unfinished coverage. "
+                    + "Resume retains the original traversal and deduplication set, not an immutable world snapshot. New entities in already processed chunks are not revisited. "
+                    + "Observation offsets are relative to captureStartedAt, including gaps between segments. Nearby humans use horizontal distance. "
+                    + "Owner hints are not proven creators; tracking subscriptions are not CPU cost. "
                     + "Labels capped at 64 entries and 128 characters; player names, human UUIDs, PDC values and display text are omitted.");
             report.put("entities", detached);
-            chunks = new Chunk[0]; entities = new Entity[0]; seen.clear(); samples.clear();
-            scan = null;
-            writing = true;
-            Path output = plugin.getDataFolder().toPath().resolve("reports")
-                    .resolve("entities-" + System.currentTimeMillis() + "-" + UUID.randomUUID() + ".json");
-            writer.execute(() -> {
-                try {
-                    report.put("groups", CensusSummary.summarize(detached));
-                    Files.createDirectories(output.getParent());
-                    try (var out = Files.newBufferedWriter(output, StandardOpenOption.CREATE_NEW)) {
-                        new GsonBuilder().setPrettyPrinting().create().toJson(report, out);
-                    }
-                    plugin.getLogger().info("[ENTITY-CENSUS] Saved " + output.toAbsolutePath() + " (" + reason + ", " + detached.size() + " entities)");
-                } catch (IOException | RuntimeException e) {
-                    plugin.getLogger().log(java.util.logging.Level.SEVERE, "[ENTITY-CENSUS] Cannot save " + output, e);
-                } finally { writing = false; }
+            samples.clear();
+            int finishedSegment = segment;
+            reports.write(name(), context, finishedSegment, () -> {
+                report.put("groups", CensusSummary.summarize(detached));
+                report.put("sections", CensusSummary.sections(detached));
+                return report;
             });
+            if (!canResume) scan = null;
         }
     }
 }

@@ -77,4 +77,16 @@ class EntitySampleTest {
                 true, true, true, 100, tracked, tracked, 1, 2, 3, List.of("test:owner"),
                 List.of("pdc:test"), List.of(), false, 0, null, null, 10);
     }
+
+    @Test void sectionDensityKeepsNegativeHeightSectionsSeparate() {
+        var above = sample("above", 3);
+        var below = new EntitySample("below", "world", -1, -2, -1, -1, -17, "ITEM_DISPLAY", false, false,
+                true, true, true, 100, 0, 0, 1, 2, 3, List.of(), List.of(), List.of(), false, 0, null, null, 10);
+        var rows = CensusSummary.sections(List.of(above, above, below));
+        assertEquals(2, rows.size());
+        assertEquals(3, rows.getFirst().section().sectionY());
+        assertEquals(2, rows.getFirst().entities());
+        assertEquals(6, rows.getFirst().trackedHumanSubscriptions());
+        assertEquals(-1, rows.getLast().section().sectionY());
+    }
 }

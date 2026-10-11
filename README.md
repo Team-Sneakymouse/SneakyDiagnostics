@@ -1,6 +1,6 @@
 # SneakyDiagnostics
 
-Paper 26.2 diagnostics plugin for investigating TPS issues in custom plugins and scripts. Java 25 is required. Collection is off until an operator starts it. The initial collector is the migrated entity census; scheduler, spatial-query, and other probes are future work.
+Paper 26.2 diagnostics plugin for investigating TPS issues in custom plugins and scripts. Java 25 is required. Collection is manual. Available collectors cover entities, the tick timeline, and public scheduler state.
 
 ## Build and install
 
@@ -16,9 +16,30 @@ Copy `build/libs/SneakyDiagnostics-<version>.jar` (not the sources JAR) to the s
 /diagnostics entities start world
 /diagnostics entities status
 /diagnostics entities stop
+/diagnostics entities resume 120
+/diagnostics timeline start 60
+/diagnostics scheduler start 60
+/diagnostics all start 60 world
+/diagnostics all status
+/diagnostics all stop
 ```
 
-Omit the world argument to scan all currently loaded worlds. Permission `sneakydiagnostics.entities` defaults to operators. `/sneakydiagnostics` is the full command name; `/entitycensus <start [world]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. A second capture is rejected until collection and report writing finish. Completion logs the absolute report path under `plugins/SneakyDiagnostics/reports/`. Stop writes a partial report.
+`/sneakydiagnostics` is the full command name. The individual collectors accept `start`, `status`, and `stop`; entities also accepts `resume`. Durations are wall-clock seconds, from 1 to 1800. Entity captures default to 120 seconds; other captures default to 60 seconds.
+
+| Command | Start options | Permission |
+| --- | --- | --- |
+| `/diagnostics entities` | `start [world] [seconds]` or `start [seconds]` | `sneakydiagnostics.entities` |
+| `/diagnostics timeline` | `start [seconds]` | `sneakydiagnostics.timeline` |
+| `/diagnostics scheduler` | `start [seconds]` | `sneakydiagnostics.scheduler` |
+| `/diagnostics all` | `start [seconds] [world]` | `sneakydiagnostics.all` |
+
+All permissions default to operators. `sneakydiagnostics.all` includes the three individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
+
+`all start` validates every collector before starting, and shares a capture ID, timestamp, and monotonic clock across all reports. It rejects busy collectors, including pending report writes, and rolls back partial starts. Individual captures can overlap independently; starting or resuming another capture is blocked while a coordinated capture is still active. `all stop` stops all active collectors, including independently started ones. A census may finish before the requested time if it reaches the end of its traversal; timeline and scheduler collection continue for their full window.
+
+Completion logs absolute paths under `plugins/SneakyDiagnostics/reports/<capture-id>/`. Each collector writes its own JSON file, such as `entities-1.json`, `timeline-1.json`, or `scheduler-1.json`. Stop writes partial reports. Files have the shared capture identity and offsets as well as their actual completion reason and collector-specific coverage information.
+
+An unfinished census can be continued with `/diagnostics entities resume [seconds]` after its previous report finishes writing. Resume continues the same cursor and deduplication set, writes `entities-2.json` and subsequent segments under the same capture ID, and includes pauses in observation offsets. Entities, groups, and sections in each file describe that segment; coverage counters and unique attempts are cumulative. Combine all segments when analyzing the whole census. Starting a new census discards the paused cursor. Resume state exists only in memory and is discarded on plugin disable/restart.
 
 The first useful capture is during the sustained 11–15 TPS condition. Run it alongside `/ms perf start 60` from the instrumented MagicSpells build, and note the capture times. Repeat the census after one controlled change when player locations and activity are comparable.
 
@@ -33,9 +54,9 @@ CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have ac
 
 For local publishing, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishMavenPublicationToSneakyrpRepository`. Never commit credentials. `publishToMavenLocal` can verify publication packaging without remote credentials.
 
-`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `entity` package owns the bounded census, detached entity records, and report aggregation. Additional collectors can be added alongside it without making entity collection the plugin's top-level abstraction. The initial setup includes no automatic capture, NMS hooks, Java agent, or additional performance probes.
+`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, and `scheduler` own their collection state. There is no automatic capture, NMS hook, Java agent, or reflection into scheduler internals.
 
-The report schema and `entities-*.json` filenames are preserved from the proof of concept, so existing analysis scripts can continue reading reports. Reports now live under the new plugin's data folder. Remove the old `SneakyEntityCensus` JAR when installing this plugin to avoid duplicate `/entitycensus` registrations.
+The original entity fields, chunk groups, and `entities-*.json` filename pattern are preserved; capture identity, coverage, and sections are additive. Files now live in capture subdirectories; resumed files contain separate segments. Update collection/analysis scripts to discover those directories and combine segments rather than assuming one file is the entire census. Remove the old `SneakyEntityCensus` JAR when installing this plugin to avoid duplicate `/entitycensus` registrations.
 
 ## Entity census fields
 
@@ -45,18 +66,40 @@ The report schema and `entities-*.json` filenames are preserved from the proof o
 - PDC key names, namespace hints, `NPC` metadata provider names, scoreboard tags. Namespace/provider hints do not prove which plugin created an entity.
 - Displays: view-range multiplier, bounding dimensions, interpolation and teleport duration, and item/block material. Display view range is not the effective server tracking range in blocks.
 - Groups by world, chunk, entity type and owner hints, sorted by tracking-human subscriptions. Ten entities tracked by three humans contribute 30 subscriptions, not three unique viewers.
+- Per-section counts by world, chunk, vertical section (`floor(y / 16)`) and entity type, sorted by entity density.
+- Per-world snapshot availability, loaded chunks at snapshot time, visited/completed/skipped/unvisited/partial chunks, and entity attempt/sample counts. `snapshotChunks=-1` means that world has not been reached. An unavailable world cannot produce a complete census.
 - Collection overhead, start/end rolling MSPT, timestamps, skipped chunks, failed reads, and completion reason.
 
 Player names, human UUIDs, PDC values, item metadata and text-display contents are omitted. UUIDs inside arbitrary scoreboard tags are not scrubbed. Treat the report as server diagnostic data.
 
 ## Bounds and interpretation
 
-The scanner targets 2 ms per tick, at most 200 examined entities and eight visited chunks per tick. It stops after 120 wall-clock seconds, 100,000 unique entity attempts or 30,000 visited chunks. Paper API calls are not preemptible, so 2 ms is a target rather than a hard maximum. `maxSliceNanos` exposes overruns. The one-time snapshot copy and report dispatch at completion are outside slice timing.
+The scanner targets 2 ms per tick, at most 200 examined entities and eight visited chunks per tick. Each segment stops at its requested wall-clock duration, 100,000 unique entity attempts or 30,000 visited chunks; the traversal can then be resumed. A census ends permanently at 500,000 unique attempts across all segments. Paper calls are not preemptible, so 2 ms is a target rather than a hard maximum. `maxSliceNanos` exposes overruns. The one-time snapshot copy and report dispatch at completion are outside slice timing.
 
-Only loaded chunks with entities already loaded are read. No chunks are loaded or held with tickets. Bukkit state is accessed on the server thread; report grouping and serialization happen on a separate writer thread using detached records. Each world's loaded-chunk list is obtained when that world is reached. New chunks and entities can appear during collection; this is an incremental census, not a simultaneous snapshot. Per-entity observation offsets and skip/error counters expose some of that uncertainty. UUID deduplication avoids counting an entity twice if it moves between chunks.
+Only loaded chunks with entities already loaded are read. No chunks are loaded or held with tickets. Bukkit state is accessed on the server thread; report grouping and serialization happen on a separate writer thread using detached records. Each world's loaded-chunk list is obtained when that world is reached. New chunks and entities can appear during collection; this is an incremental census, not a simultaneous snapshot. Resume keeps references to the pending chunk/entity arrays and up to 500,000 deduplication UUIDs. It rechecks chunk/world availability and entity validity; it does not revisit entities arriving in chunks already processed. Per-entity observation offsets and skip/error counters expose some of that uncertainty. UUID deduplication avoids counting an entity twice if it moves between chunks or between segments.
 
 Label lists are capped at 64 entries and each label at 128 characters, with truncation flagged. Report files are not automatically deleted. On plugin disable an active partial report is queued, and the writer is allowed to finish; an abrupt process exit can still interrupt a write.
 
 Tracking subscriptions are not measurements of tracker CPU time, update frequency, or rejected visibility checks. This plugin identifies candidate groups for a subsequent targeted NMS probe if necessary.
 
 Paper API reference: [entity tracking](https://jd.papermc.io/paper/26.2/org/bukkit/entity/Entity.html#getTrackedBy()).
+
+## Tick timeline
+
+Paper tick-end events are grouped into one-second windows using the shared capture clock. Each window reports observed tick count, mean/min/max duration, counts over 50/100 ms, and first/last server tick numbers. Empty seconds remain gaps rather than invented zero-cost ticks. Offsets describe tick-end observations; Paper's duration excludes remaining tick-end listeners and idle sleep. These are server-wide measurements, not per-plugin CPU timings. Handler collection overhead is recorded separately; report dispatch is outside that timing.
+
+## Scheduler snapshots
+
+At most once per wall-clock second at tick end, capture pending sync/async tasks by owning plugin and scheduler task implementation class, cancelled flags, and active async worker counts by plugin. Task implementation classes are scheduler wrappers: the runnable class is unavailable through the public interface. Worker thread names and task IDs are not written.
+
+New/missing task IDs between complete snapshots describe observed churn. They are not exact creation, execution, or cancellation rates, and short-lived tasks between snapshots are missed. Async state can also change during a read. Diagnostics' own pending census task is included. Grouping is capped at 50,000 examined tasks, 5,000 workers, and 512 groups per snapshot; truncation and overflow counts are explicit, and truncated task-ID sets cannot produce churn comparisons. The Bukkit calls copy their full lists before these caps apply, so snapshot overhead includes potentially expensive non-preemptible list copies.
+
+## Deeper probes
+
+The next measurements are exact task creation/execution/cancellation attribution, spatial-query caller/radius/candidate counts, altered-block history lifecycle, and separate undo/particle timings. Bounded changes in MagicSpells and SneakyConfigurableVoice can supply logical spell/cast/lifecycle context. Exact server-internal candidate counts and deferred cancellation work need deeper instrumentation.
+
+The recommended arrangement is this Paper plugin for capture controls/reporting plus an optional Ignite companion for version-pinned Mixins. [Ignite](https://github.com/vectrix-space/ignite) transforms server classes before startup, and the sibling SneakyPatches project already targets the same Paper revision. Keep those hooks separately testable and measure their enabled/disabled overhead. This milestone does not yet install or implement the companion, or modify sibling plugins.
+
+## Verification
+
+`build` runs tests for capture preflight/rollback and shared identity, option validation, tick-window alignment, scheduler ownership/churn/overflow, entity extraction/section density, and paused census traversal across resumed segments and chunk/world unloads. The scanner tests reject unexpected world/chunk calls, including chunk loading. These tests exercise detached calculations and collection against controlled public-interface fixtures; they do not start a live Paper server. Verify commands, permissions, reports, and probe overhead on an isolated Paper server before production deployment.
