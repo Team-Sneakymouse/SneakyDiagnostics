@@ -1,5 +1,5 @@
 {
   "id": "sneakydiagnostics",
   "version": "${version}",
-  "mixins": []
+  "mixins": ["mixins.sneakydiagnostics.scheduler.json"]
 }

@@ -100,6 +100,22 @@ val verifyArtifacts by tasks.registering {
             check(metadata["id"] == "sneakydiagnostics") { "Unexpected Ignite mod ID" }
             check(metadata["version"] == project.version.toString()) { "Ignite version differs from build version" }
             check(metadata["mixins"] is List<*>) { "Ignite mixin registration must be explicit" }
+            val configs = metadata["mixins"] as List<*>
+            check(configs.isNotEmpty()) { "Scheduler probe configuration is missing" }
+            configs.forEach { name ->
+                val entry = checkNotNull(jar.getEntry(name as String)) { "Missing Mixin configuration: $name" }
+                val config = jar.getInputStream(entry).use { JsonSlurper().parse(it) as Map<*, *> }
+                check(config["required"] == true) { "$name must require its injections" }
+                check(jar.getEntry((config["plugin"] as String).replace('.', '/') + ".class") != null) { "Missing platform selector" }
+                val mixins = config["probeMixins"] as List<*>
+                check(mixins.isNotEmpty()) { "No probe mixins registered" }
+                mixins.forEach { mixin ->
+                    check(jar.getEntry("${config["package"]}.$mixin".replace('.', '/') + ".class") != null) { "Missing probe mixin: $mixin" }
+                }
+            }
+            jar.entries().asSequence().filter { it.name.endsWith(".class") }.forEach {
+                check(it.name.startsWith("com/teamsneakymouse/sneakydiagnostics/ignite/")) { "Server/loader/plugin classes must not be bundled: ${it.name}" }
+            }
             check(jar.getEntry("plugin.yml") == null) { "Plugin metadata must stay in the plugin JAR" }
             check(jar.getEntry("com/teamsneakymouse/sneakydiagnostics/SneakyDiagnosticsPlugin.class") == null) { "Companion must not bundle the plugin" }
         }

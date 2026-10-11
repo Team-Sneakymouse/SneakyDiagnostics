@@ -25,12 +25,15 @@ public final class SchedulerCollector implements DiagnosticCollector, Listener {
     private long lastOffset;
     private long totalCollectionNanos, maxCollectionNanos;
     private int errors;
+    private final IgniteSchedulerProbe ignite = new IgniteSchedulerProbe();
+    private boolean igniteActive;
+    private String igniteAvailability;
 
     public SchedulerCollector(JavaPlugin plugin, ReportSink reports) { this.plugin = plugin; this.reports = reports; }
     @Override public String name() { return "scheduler"; }
     @Override public boolean active() { return context != null; }
     @Override public boolean busy() { return active() || reports.busy(name()); }
-    @Override public String status() { return active() ? "Collecting " + context.id() + ": " + snapshots.size() + " snapshots" : reports.busy(name()) ? "Writing report" : "Idle"; }
+    @Override public String status() { return (active() ? "Collecting " + context.id() + ": " + snapshots.size() + " snapshots" : reports.busy(name()) ? "Writing report" : "Idle") + "; scheduler probe: " + ignite.status(); }
     @Override public void start(CaptureContext context, List<World> worlds) {
         if (busy()) throw new IllegalStateException("Scheduler collector is busy");
         this.context = context;
@@ -39,6 +42,12 @@ public final class SchedulerCollector implements DiagnosticCollector, Listener {
         errors = 0;
         totalCollectionNanos = maxCollectionNanos = 0;
         lastOffset = -1000;
+        igniteActive = false;
+        igniteAvailability = ignite.status();
+        if (ignite.available()) {
+            try { ignite.start(context); igniteActive = true; }
+            catch (Exception e) { this.context = null; throw new IllegalStateException("Cannot start Ignite scheduler probe", e); }
+        }
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -72,8 +81,24 @@ public final class SchedulerCollector implements DiagnosticCollector, Listener {
         if (!active()) return;
         CaptureContext finished = context;
         var report = reports.header(name(), finished, reason, 1);
+        boolean probeComplete = true;
         report.put("startedAt", finished.startedAt());
-        report.put("complete", reason.equals("completed") && errors == 0 && snapshots.stream().noneMatch(SchedulerSnapshot.Snapshot::truncated));
+        report.put("igniteAvailability", igniteAvailability);
+        if (igniteActive) {
+            try {
+                var measurement = ignite.stop(finished.id());
+                report.put("ignite", measurement);
+                probeComplete = ((Number) measurement.get("droppedEvents")).longValue() == 0 && ((Number) measurement.get("droppedTaskIds")).longValue() == 0
+                        && ((Number) measurement.get("inFlightAtStop")).longValue() == 0;
+                report.put("igniteComplete", probeComplete);
+            } catch (Exception e) {
+                errors++;
+                report.put("igniteError", e.toString());
+                plugin.getLogger().log(Level.WARNING, "Cannot stop Ignite scheduler probe", e);
+            }
+        }
+        igniteActive = false;
+        report.put("complete", reason.equals("completed") && errors == 0 && probeComplete && snapshots.stream().noneMatch(SchedulerSnapshot.Snapshot::truncated));
         report.put("errors", errors);
         report.put("totalCollectionNanos", totalCollectionNanos);
         report.put("maxCollectionNanos", maxCollectionNanos);
@@ -81,7 +106,7 @@ public final class SchedulerCollector implements DiagnosticCollector, Listener {
         report.put("limits", java.util.Map.of("sampleIntervalMillis", 1000, "tasksPerSnapshot", SchedulerSnapshot.MAX_TASKS,
                 "workersPerSnapshot", SchedulerSnapshot.MAX_WORKERS, "groupsPerSnapshot", SchedulerSnapshot.MAX_GROUPS));
         report.put("notes", "Public Bukkit scheduler snapshots, including diagnostics' own pending tasks. "
-                + "Task implementation class is the scheduler wrapper, not the owning runnable. Runnable class and cancellation callers are unavailable. "
+                + "In public snapshots, task implementation class is the scheduler wrapper; runnable class and cancellation callers are unavailable. Optional Ignite measurements are reported separately. "
                 + "New/missing task IDs between complete snapshots are observed churn, not creation/execution/cancellation rates; short-lived tasks can be missed. "
                 + "getPendingTasks/getActiveWorkers copy their full lists before our caps apply; these calls are not preemptible and their cost is included. "
                 + "Async scheduler state can change during a snapshot. World filters do not restrict scheduler collection.");

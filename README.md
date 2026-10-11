@@ -1,6 +1,6 @@
 # SneakyDiagnostics
 
-Paper 26.2 diagnostics plugin for investigating TPS issues in custom plugins and scripts. Java 25 is required. Collection is manual. Available collectors cover entities, the tick timeline, and public scheduler state.
+Paper 26.2+ diagnostics plugin for investigating TPS issues in custom plugins and scripts. Java 25 is required. Collection is manual. Available collectors cover entities, the tick timeline, public scheduler state, and optional Ignite scheduler instrumentation.
 
 ## Build and install
 
@@ -10,19 +10,19 @@ Paper 26.2 diagnostics plugin for investigating TPS issues in custom plugins and
 
 Copy `plugin/build/libs/SneakyDiagnostics-<version>.jar` (not the sources JAR) to the server's `plugins/` folder and restart the server. The plugin works independently of Ignite. This project does not deploy itself or change production configuration.
 
-The optional companion builds as `ignite/build/libs/SneakyDiagnostics-Ignite-<version>.jar`, intended for Ignite's `mods/` directory. It currently contains discovery metadata only and has no active probes, so installing it provides no additional measurements yet.
+For scheduler execution and cancellation attribution, copy `ignite/build/libs/SneakyDiagnostics-Ignite-<version>.jar` to Ignite's `mods/` directory and restart. Keep only one companion version installed. Scheduler captures automatically include its measurements when available; status reports availability. The tested baseline is Paper 26.2 build 116 with Ignite 1.2.1. Later releases are accepted when the required hook contracts remain compatible, without an exact build-number gate. See the [companion documentation](ignite/README.md) for compatibility and runtime checks.
 
 ## Repository layout
 
 ```text
 plugin/                   Paper plugin, collectors, commands, and existing tests
-ignite/                   Optional Ignite companion, future Mixins and hook tests
+ignite/                   Optional Ignite scheduler Mixins and hook tests
 build.gradle.kts          Shared version, Java toolchain, publishing, and artifact checks
 settings.gradle.kts       Module registration
 .github/workflows/        One build/publishing workflow for both artifacts
 ```
 
-Root `build`, `check`, and `clean` cover both modules. Use `:plugin:build` or `:ignite:build` for a module-specific build. Root checks verify that the two JARs have matching versions and separate plugin/mod descriptors. No shared bridge module is introduced until the first hook defines its interface and classloader ownership.
+Root `build`, `check`, and `clean` cover both modules. Use `:plugin:build` or `:ignite:build` for a module-specific build. Root checks verify matching versions, separate plugin/mod descriptors, required Mixins, and exclusion of server/loader classes. The bridge uses the JVM's local MBean server and JDK values; the plugin never loads companion classes and no shared module is needed.
 
 ## Capture
 
@@ -68,7 +68,7 @@ CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have ac
 
 For publishing from a local checkout, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishAll`. The original `publishMavenPublicationToSneakyrpRepository` command remains an alias that publishes both artifacts. Never commit credentials. Root `publishToMavenLocal` can verify both publications without remote credentials.
 
-`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, and `scheduler` own their collection state. There is no automatic capture, NMS hook, Java agent, or reflection into scheduler internals.
+`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, and `scheduler` own their collection state. The Paper plugin uses public APIs; the optional Ignite companion instruments scheduler internals. There is no automatic capture.
 
 The original entity fields, chunk groups, and `entities-*.json` filename pattern are preserved; capture identity, coverage, and sections are additive. Files now live in capture subdirectories; resumed files contain separate segments. Update collection/analysis scripts to discover those directories and combine segments rather than assuming one file is the entire census. Remove the old `SneakyEntityCensus` JAR when installing this plugin to avoid duplicate `/entitycensus` registrations.
 
@@ -110,10 +110,14 @@ New/missing task IDs between complete snapshots describe observed churn. They ar
 
 ## Deeper probes
 
-The next measurements are exact task creation/execution/cancellation attribution, spatial-query caller/radius/candidate counts, altered-block history lifecycle, and separate undo/particle timings. Bounded changes in MagicSpells and SneakyConfigurableVoice can supply logical spell/cast/lifecycle context. Exact server-internal candidate counts and deferred cancellation work need deeper instrumentation.
+With the companion installed, `/diagnostics scheduler start` and `/diagnostics all start` also capture task creation, sync/async runnable and consumer execution, callable execution, individual/plugin cancellation requests, repeated individual cancellation requests, and deferred cancellation scans. The scheduler report's `ignite` section groups these by owner, body class, sync flag, event, and cancellation caller. It includes started/completed/throwing counts, total/max duration, observation offsets, overflow counters, and unfinished scopes at stop. Without the companion, public snapshots remain available.
 
-The repository separates the Paper plugin for capture controls/reporting from the optional Ignite companion for version-pinned Mixins. [Ignite](https://github.com/vectrix-space/ignite) transforms server classes before startup, and the sibling SneakyPatches project already targets the same Paper revision. Keep those hooks separately testable and measure their enabled/disabled overhead. The [companion module](ignite/README.md) is currently a scaffold; no hooks or plugin-to-mod bridge have been implemented, and no sibling plugins have been modified.
+Probe state is bounded to 2,048 groups and 100,000 entries in each task-identity/cancellation map, with labels capped at 192 characters. Hooks bypass aggregation outside captures; captures expire on their monotonic deadline even when no tick arrives. Execution durations are inclusive wall time, not CPU time. Cancellation requests do not count removed tasks, and request/deferred/execution scopes can overlap. Creation timing measures probe bookkeeping. Unknown targets can predate capture; a caller frame is evidence of a call site, not proven plugin ownership. Read report notes before comparing totals.
+
+The remaining measurements are spatial-query caller/radius/candidate counts, altered-block history lifecycle, and separate undo/particle timings. Bounded changes in MagicSpells and SneakyConfigurableVoice can supply logical spell/cast/lifecycle context. No sibling plugins have been modified. [Ignite](https://github.com/vectrix-space/ignite) supplies class transformation; compatibility contracts and a runtime proof belong in the [companion module](ignite/README.md).
 
 ## Verification
 
-`build` runs tests for capture preflight/rollback and shared identity, option validation, tick-window alignment, scheduler ownership/churn/overflow, entity extraction/section density, and paused census traversal across resumed segments and chunk/world unloads. The scanner tests reject unexpected world/chunk calls, including chunk loading. These tests exercise detached calculations and collection against controlled public-interface fixtures; they do not start a live Paper server. Verify commands, permissions, reports, and probe overhead on an isolated Paper server before production deployment.
+`build` runs tests for capture preflight/rollback and shared identity, option validation, tick-window alignment, scheduler ownership/churn/overflow, entity extraction/section density, and paused census traversal across resumed segments and chunk/world unloads. The scanner tests reject unexpected world/chunk calls, including chunk loading. Companion tests cover hook contracts, bounded aggregation, cancellation attribution, capture expiration, and detached reports; bridge tests exercise JDK-only communication and protocol mismatch.
+
+The opt-in `:ignite:verifyRuntime` check uses real Ignite transformations against Paper scheduler classes, preserving return values/exceptions and verifying a separate plugin classloader. It starts no Minecraft server. Its warm-loop timing is a synthetic smoke measurement, not a server TPS benchmark. Verify commands, permissions, reports, and probe overhead on an isolated Paper server before production deployment.
