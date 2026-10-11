@@ -8,7 +8,21 @@ Paper 26.2 diagnostics plugin for investigating TPS issues in custom plugins and
 .\gradlew.bat build
 ```
 
-Copy `build/libs/SneakyDiagnostics-<version>.jar` (not the sources JAR) to the server's plugins folder and restart the server. This project does not deploy itself or change production configuration.
+Copy `plugin/build/libs/SneakyDiagnostics-<version>.jar` (not the sources JAR) to the server's `plugins/` folder and restart the server. The plugin works independently of Ignite. This project does not deploy itself or change production configuration.
+
+The optional companion builds as `ignite/build/libs/SneakyDiagnostics-Ignite-<version>.jar`, intended for Ignite's `mods/` directory. It currently contains discovery metadata only and has no active probes, so installing it provides no additional measurements yet.
+
+## Repository layout
+
+```text
+plugin/                   Paper plugin, collectors, commands, and existing tests
+ignite/                   Optional Ignite companion, future Mixins and hook tests
+build.gradle.kts          Shared version, Java toolchain, publishing, and artifact checks
+settings.gradle.kts       Module registration
+.github/workflows/        One build/publishing workflow for both artifacts
+```
+
+Root `build`, `check`, and `clean` cover both modules. Use `:plugin:build` or `:ignite:build` for a module-specific build. Root checks verify that the two JARs have matching versions and separate plugin/mod descriptors. No shared bridge module is introduced until the first hook defines its interface and classloader ownership.
 
 ## Capture
 
@@ -46,13 +60,13 @@ The first useful capture is during the sustained 11–15 TPS condition. Run it a
 ## Publishing and development
 
 The public repository is [Team-Sneakymouse/SneakyDiagnostics](https://github.com/Team-Sneakymouse/SneakyDiagnostics).
-Pushes to `main` and manual runs of the `Publish Maven` workflow build and check the plugin before publishing the plugin JAR, sources JAR, and POM to `https://maven.sneakyrp.com/releases`.
+Pushes to `main` and manual runs of the `Publish Maven` workflow build and check both modules before publishing both artifact sets (JAR, sources JAR, and POM) to `https://maven.sneakyrp.com/releases`. Each remote publication depends on the repository's complete checks.
 
-Maven coordinates are `io.github.team-sneakymouse:SneakyDiagnostics:<version>`. Versions use the commit date in UTC and its 12-character hash: `yyyy.MM.dd-<hash>`. A committed Git checkout is required to build.
+Maven coordinates are `io.github.team-sneakymouse:SneakyDiagnostics:<version>` for the plugin and `io.github.team-sneakymouse:SneakyDiagnostics-Ignite:<version>` for the companion. The plugin's existing coordinates are preserved. Both use the same version derived from the commit date in UTC and its 12-character hash: `yyyy.MM.dd-<hash>`. A committed Git checkout is required to build.
 
 CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have access to `INFISICAL_IDENTITY_ID` and `INFISICAL_DOMAIN` GitHub Actions secrets, and the identity must authorize this repository. Infisical project `lords-of-minecraft`, environment `prod`, path `/Maven` must provide `MAVEN_USERNAME` and `MAVEN_PASSWORD`.
 
-For local publishing, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishMavenPublicationToSneakyrpRepository`. Never commit credentials. `publishToMavenLocal` can verify publication packaging without remote credentials.
+For publishing from a local checkout, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishAll`. The original `publishMavenPublicationToSneakyrpRepository` command remains an alias that publishes both artifacts. Never commit credentials. Root `publishToMavenLocal` can verify both publications without remote credentials.
 
 `SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, and `scheduler` own their collection state. There is no automatic capture, NMS hook, Java agent, or reflection into scheduler internals.
 
@@ -98,7 +112,7 @@ New/missing task IDs between complete snapshots describe observed churn. They ar
 
 The next measurements are exact task creation/execution/cancellation attribution, spatial-query caller/radius/candidate counts, altered-block history lifecycle, and separate undo/particle timings. Bounded changes in MagicSpells and SneakyConfigurableVoice can supply logical spell/cast/lifecycle context. Exact server-internal candidate counts and deferred cancellation work need deeper instrumentation.
 
-The recommended arrangement is this Paper plugin for capture controls/reporting plus an optional Ignite companion for version-pinned Mixins. [Ignite](https://github.com/vectrix-space/ignite) transforms server classes before startup, and the sibling SneakyPatches project already targets the same Paper revision. Keep those hooks separately testable and measure their enabled/disabled overhead. This milestone does not yet install or implement the companion, or modify sibling plugins.
+The repository separates the Paper plugin for capture controls/reporting from the optional Ignite companion for version-pinned Mixins. [Ignite](https://github.com/vectrix-space/ignite) transforms server classes before startup, and the sibling SneakyPatches project already targets the same Paper revision. Keep those hooks separately testable and measure their enabled/disabled overhead. The [companion module](ignite/README.md) is currently a scaffold; no hooks or plugin-to-mod bridge have been implemented, and no sibling plugins have been modified.
 
 ## Verification
 
