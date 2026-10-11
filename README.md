@@ -22,7 +22,22 @@ Omit the world argument to scan all currently loaded worlds. Permission `sneaky.
 
 The first useful capture is during the sustained 11–15 TPS condition. Run it alongside `/ms perf start 60` from the instrumented MagicSpells build, and note the capture times. Repeat the census after one controlled change when player locations and activity are comparable.
 
-## Collected data
+## Publishing and development
+
+The public repository is [Team-Sneakymouse/SneakyDiagnostics](https://github.com/Team-Sneakymouse/SneakyDiagnostics).
+Pushes to `main` and manual runs of the `Publish Maven` workflow build and check the plugin before publishing the plugin JAR, sources JAR, and POM to `https://maven.sneakyrp.com/releases`.
+
+Maven coordinates are `io.github.team-sneakymouse:SneakyDiagnostics:<version>`. Versions use the commit date in UTC and its 12-character hash: `yyyy.MM.dd-<hash>`. A committed Git checkout is required to build.
+
+CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have access to `INFISICAL_IDENTITY_ID` and `INFISICAL_DOMAIN` GitHub Actions secrets, and the identity must authorize this repository. Infisical project `lords-of-minecraft`, environment `prod`, path `/Maven` must provide `MAVEN_USERNAME` and `MAVEN_PASSWORD`.
+
+For local publishing, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishMavenPublicationToSneakyrpRepository`. Never commit credentials. `publishToMavenLocal` can verify publication packaging without remote credentials.
+
+`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `entity` package owns the bounded census, detached entity records, and report aggregation. Additional collectors can be added alongside it without making entity collection the plugin's top-level abstraction. The initial setup includes no automatic capture, NMS hooks, Java agent, or additional performance probes.
+
+The report schema and `entities-*.json` filenames are preserved from the proof of concept, so existing analysis scripts can continue reading reports. Reports now live under the new plugin's data folder. Remove the old `SneakyEntityCensus` JAR when installing this plugin to avoid duplicate `/entitycensus` registrations.
+
+## Entity census fields
 
 - Per entity: type, non-human UUID, world, position, chunk, persistence, ticking-chunk status, visibility default, age, passenger count and vehicle UUID.
 - Current tracking-player count and current tracking-human count from Paper's `getTrackedBy()`. Humans are online players without `NPC` metadata. This is a heuristic, not a universal NPC detector.
