@@ -1,0 +1,25 @@
+name: SneakyDiagnostics
+version: '${version}'
+main: com.teamsneakymouse.sneakydiagnostics.SneakyDiagnosticsPlugin
+api-version: '26.2'
+description: On-demand diagnostics for investigating server TPS issues
+author: Team Sneakymouse
+website: https://github.com/Team-Sneakymouse/SneakyDiagnostics
+commands:
+  sneakydiagnostics:
+    aliases: [diagnostics]
+    description: Collect server diagnostics
+    usage: /<command> entities <start [world]|status|stop>
+    permission: sneaky.diagnostics.entities
+  entitycensus:
+    description: Collect a loaded-entity census (compatibility command)
+    usage: /<command> <start [world]|status|stop>
+    permission: sneaky.entitycensus
+permissions:
+  sneaky.diagnostics.entities:
+    description: Collect and control entity census reports
+    default: op
+  sneaky.entitycensus:
+    description: Use the legacy entity census command
+    default: op
+
