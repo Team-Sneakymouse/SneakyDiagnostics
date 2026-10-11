@@ -36,7 +36,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
         if (command.getName().equalsIgnoreCase("entitycensus")) {
             return entities.onTabComplete(sender, command, alias, args);
         }
-        if (!sender.hasPermission("sneaky.diagnostics.entities")) return List.of();
+        if (!sender.hasPermission("sneakydiagnostics.entities")) return List.of();
         if (args.length == 1) {
             return "entities".startsWith(args[0].toLowerCase(Locale.ROOT)) ? List.of("entities") : List.of();
         }

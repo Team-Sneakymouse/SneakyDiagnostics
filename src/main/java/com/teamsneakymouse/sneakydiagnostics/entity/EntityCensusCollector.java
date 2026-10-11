@@ -52,7 +52,7 @@ public final class EntityCensusCollector implements AutoCloseable {
     }
 
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!sender.hasPermission("sneaky.diagnostics.entities") && !sender.hasPermission("sneaky.entitycensus")) {
+        if (!sender.hasPermission("sneakydiagnostics.entities") && !sender.hasPermission("sneaky.entitycensus")) {
             sender.sendMessage("You do not have permission to collect an entity census.");
             return true;
         }
@@ -84,7 +84,7 @@ public final class EntityCensusCollector implements AutoCloseable {
     }
 
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (!sender.hasPermission("sneaky.diagnostics.entities") && !sender.hasPermission("sneaky.entitycensus")) return List.of();
+        if (!sender.hasPermission("sneakydiagnostics.entities") && !sender.hasPermission("sneaky.entitycensus")) return List.of();
         if (args.length == 1) return List.of("start", "status", "stop").stream()
                 .filter(s -> s.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
         if (args.length == 2 && args[0].equalsIgnoreCase("start")) return Bukkit.getWorlds().stream()

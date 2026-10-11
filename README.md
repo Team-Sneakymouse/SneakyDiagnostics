@@ -18,7 +18,7 @@ Copy `build/libs/SneakyDiagnostics-<version>.jar` (not the sources JAR) to the s
 /diagnostics entities stop
 ```
 
-Omit the world argument to scan all currently loaded worlds. Permission `sneaky.diagnostics.entities` defaults to operators. `/sneakydiagnostics` is the full command name; `/entitycensus <start [world]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. A second capture is rejected until collection and report writing finish. Completion logs the absolute report path under `plugins/SneakyDiagnostics/reports/`. Stop writes a partial report.
+Omit the world argument to scan all currently loaded worlds. Permission `sneakydiagnostics.entities` defaults to operators. `/sneakydiagnostics` is the full command name; `/entitycensus <start [world]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. A second capture is rejected until collection and report writing finish. Completion logs the absolute report path under `plugins/SneakyDiagnostics/reports/`. Stop writes a partial report.
 
 The first useful capture is during the sustained 11–15 TPS condition. Run it alongside `/ms perf start 60` from the instrumented MagicSpells build, and note the capture times. Repeat the census after one controlled change when player locations and activity are comparable.
 

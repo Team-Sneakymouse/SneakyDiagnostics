@@ -10,13 +10,13 @@ commands:
     aliases: [diagnostics]
     description: Collect server diagnostics
     usage: /<command> entities <start [world]|status|stop>
-    permission: sneaky.diagnostics.entities
+    permission: sneakydiagnostics.entities
   entitycensus:
     description: Collect a loaded-entity census (compatibility command)
     usage: /<command> <start [world]|status|stop>
     permission: sneaky.entitycensus
 permissions:
-  sneaky.diagnostics.entities:
+  sneakydiagnostics.entities:
     description: Collect and control entity census reports
     default: op
   sneaky.entitycensus:
