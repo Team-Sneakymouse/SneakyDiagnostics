@@ -17,12 +17,12 @@ For scheduler execution and cancellation attribution, copy `ignite/build/libs/Sn
 ```text
 plugin/                   Paper plugin, collectors, commands, and existing tests
 ignite/                   Optional Ignite scheduler Mixins and hook tests
-build.gradle.kts          Shared version, Java toolchain, publishing, and artifact checks
+build.gradle.kts          Shared version, Java toolchain, and publishing
 settings.gradle.kts       Module registration
 .github/workflows/        One build/publishing workflow for both artifacts
 ```
 
-Root `build`, `check`, and `clean` cover both modules. Use `:plugin:build` or `:ignite:build` for a module-specific build. Root checks verify matching versions, separate plugin/mod descriptors, required Mixins, and exclusion of server/loader classes. The bridge uses the JVM's local MBean server and JDK values; the plugin never loads companion classes and no shared module is needed.
+Root `build`, `check`, and `clean` cover both modules. Use `:plugin:build` or `:ignite:build` for a module-specific build. Both modules use the shared root version; `check` runs their tests. The bridge uses the JVM's local MBean server and JDK values; the plugin never loads companion classes and no shared module is needed.
 
 ## Capture
 

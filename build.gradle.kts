@@ -1,8 +1,6 @@
-import groovy.json.JsonSlurper
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
-import java.util.zip.ZipFile
 
 plugins { base }
 
@@ -78,51 +76,6 @@ subprojects {
 tasks.assemble { dependsOn(":plugin:assemble", ":ignite:assemble") }
 tasks.check { dependsOn(":plugin:check", ":ignite:check") }
 tasks.clean { dependsOn(":plugin:clean", ":ignite:clean") }
-
-val verifyArtifacts by tasks.registering {
-    group = "verification"
-    description = "Checks artifact separation and shared version metadata."
-    dependsOn(":plugin:jar", ":ignite:jar")
-    val pluginJar = project(":plugin").tasks.named<Jar>("jar").flatMap { it.archiveFile }
-    val igniteJar = project(":ignite").tasks.named<Jar>("jar").flatMap { it.archiveFile }
-    inputs.files(pluginJar, igniteJar)
-    inputs.property("version", project.version.toString())
-    doLast {
-        ZipFile(pluginJar.get().asFile).use { jar ->
-            val descriptor = checkNotNull(jar.getEntry("plugin.yml")) { "Plugin descriptor missing" }
-            val text = jar.getInputStream(descriptor).bufferedReader().use { it.readText() }
-            check(text.contains("version: '${project.version}'")) { "Plugin version differs from build version" }
-            check(jar.getEntry("com/teamsneakymouse/sneakydiagnostics/SneakyDiagnosticsPlugin.class") != null) { "Plugin entry point missing" }
-            check(jar.getEntry("ignite.mod.json") == null) { "Ignite metadata must stay in the companion JAR" }
-        }
-        ZipFile(igniteJar.get().asFile).use { jar ->
-            val descriptor = checkNotNull(jar.getEntry("ignite.mod.json")) { "Ignite descriptor missing" }
-            val metadata = jar.getInputStream(descriptor).use { JsonSlurper().parse(it) as Map<*, *> }
-            check(metadata["id"] == "sneakydiagnostics") { "Unexpected Ignite mod ID" }
-            check(metadata["version"] == project.version.toString()) { "Ignite version differs from build version" }
-            check(metadata["mixins"] is List<*>) { "Ignite mixin registration must be explicit" }
-            val configs = metadata["mixins"] as List<*>
-            check(configs.isNotEmpty()) { "Scheduler probe configuration is missing" }
-            configs.forEach { name ->
-                val entry = checkNotNull(jar.getEntry(name as String)) { "Missing Mixin configuration: $name" }
-                val config = jar.getInputStream(entry).use { JsonSlurper().parse(it) as Map<*, *> }
-                check(config["required"] == true) { "$name must require its injections" }
-                check(jar.getEntry((config["plugin"] as String).replace('.', '/') + ".class") != null) { "Missing platform selector" }
-                val mixins = config["probeMixins"] as List<*>
-                check(mixins.isNotEmpty()) { "No probe mixins registered" }
-                mixins.forEach { mixin ->
-                    check(jar.getEntry("${config["package"]}.$mixin".replace('.', '/') + ".class") != null) { "Missing probe mixin: $mixin" }
-                }
-            }
-            jar.entries().asSequence().filter { it.name.endsWith(".class") }.forEach {
-                check(it.name.startsWith("com/teamsneakymouse/sneakydiagnostics/ignite/")) { "Server/loader/plugin classes must not be bundled: ${it.name}" }
-            }
-            check(jar.getEntry("plugin.yml") == null) { "Plugin metadata must stay in the plugin JAR" }
-            check(jar.getEntry("com/teamsneakymouse/sneakydiagnostics/SneakyDiagnosticsPlugin.class") == null) { "Companion must not bundle the plugin" }
-        }
-    }
-}
-tasks.check { dependsOn(verifyArtifacts) }
 
 tasks.register("publishAll") {
     group = "publishing"

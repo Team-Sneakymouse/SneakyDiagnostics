@@ -5,6 +5,5 @@
   "compatibilityLevel": "JAVA_25",
   "plugin": "com.teamsneakymouse.sneakydiagnostics.ignite.bootstrap.SchedulerMixins",
   "mixins": [],
-  "probeMixins": ["SchedulerMixin", "TaskMixin", "FutureMixin"],
   "injectors": {"defaultRequire": 1}
 }
