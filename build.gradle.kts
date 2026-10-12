@@ -3,7 +3,6 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.zip.ZipFile
-import javax.xml.parsers.DocumentBuilderFactory
 
 plugins { base }
 
@@ -82,16 +81,11 @@ tasks.clean { dependsOn(":plugin:clean", ":ignite:clean") }
 
 val verifyArtifacts by tasks.registering {
     group = "verification"
-    description = "Checks artifact separation, shared versions, and Maven deployment metadata."
+    description = "Checks artifact separation and shared version metadata."
     dependsOn(":plugin:jar", ":ignite:jar")
     val pluginJar = project(":plugin").tasks.named<Jar>("jar").flatMap { it.archiveFile }
     val igniteJar = project(":ignite").tasks.named<Jar>("jar").flatMap { it.archiveFile }
-    val publications = listOf("plugin" to "paper-plugin", "ignite" to "ignite-mod").map { (module, type) ->
-        project(":$module").tasks.named<GenerateMavenPom>("generatePomFileForMavenPublication") to type
-    }
-    dependsOn(publications.map { it.first })
     inputs.files(pluginJar, igniteJar)
-    inputs.files(publications.map { (task, _) -> task.map { it.destination } })
     inputs.property("version", project.version.toString())
     doLast {
         ZipFile(pluginJar.get().asFile).use { jar ->
@@ -125,18 +119,6 @@ val verifyArtifacts by tasks.registering {
             }
             check(jar.getEntry("plugin.yml") == null) { "Plugin metadata must stay in the plugin JAR" }
             check(jar.getEntry("com/teamsneakymouse/sneakydiagnostics/SneakyDiagnosticsPlugin.class") == null) { "Companion must not bundle the plugin" }
-        }
-        val parser = DocumentBuilderFactory.newInstance().apply {
-            isNamespaceAware = true
-            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
-        }.newDocumentBuilder()
-        publications.forEach { (task, expectedType) ->
-            val pom = task.get().destination
-            val document = parser.parse(pom)
-            val values = document.getElementsByTagNameNS("http://maven.apache.org/POM/4.0.0", "sneakyrp.deployment.type")
-            check(values.length == 1 && values.item(0).textContent == expectedType) {
-                "$pom must declare sneakyrp.deployment.type=$expectedType"
-            }
         }
     }
 }

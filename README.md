@@ -71,7 +71,7 @@ Each published Maven POM includes a custom `sneakyrp.deployment.type` property f
 | `SneakyDiagnostics` | `paper-plugin` | `plugins/` |
 | `SneakyDiagnostics-Ignite` | `ignite-mod` | Ignite's `mods/` |
 
-Read the version's `.pom` alongside its main JAR and select installation handling by this property. For example, the companion declares `<properties><sneakyrp.deployment.type>ignite-mod</sneakyrp.deployment.type></properties>`. This is a custom deployment convention, not Maven's packaging type; both artifacts remain JARs. The property is in the POM, not repository-level `maven-metadata.xml` or Gradle's `.module` file. Existing releases lack it; deployment systems can retain their legacy behavior for missing values and should reject unknown explicit values. Repository checks verify both generated POMs before remote publishing.
+Read the version's `.pom` alongside its main JAR and select installation handling by this property. For example, the companion declares `<properties><sneakyrp.deployment.type>ignite-mod</sneakyrp.deployment.type></properties>`. This is a custom deployment convention, not Maven's packaging type; both artifacts remain JARs. The property is in the POM, not repository-level `maven-metadata.xml` or Gradle's `.module` file. Existing releases lack it; deployment systems can retain their legacy behavior for missing values and should reject unknown explicit values.
 
 CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have access to `INFISICAL_IDENTITY_ID` and `INFISICAL_DOMAIN` GitHub Actions secrets, and the identity must authorize this repository. Infisical project `lords-of-minecraft`, environment `prod`, path `/Maven` must provide `MAVEN_USERNAME` and `MAVEN_PASSWORD`.
 
