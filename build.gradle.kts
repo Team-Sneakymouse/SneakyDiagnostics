@@ -82,11 +82,16 @@ tasks.clean { dependsOn(":plugin:clean", ":ignite:clean") }
 
 val verifyArtifacts by tasks.registering {
     group = "verification"
-    description = "Checks artifact separation and shared version metadata."
+    description = "Checks artifact separation, shared versions, and Maven deployment metadata."
     dependsOn(":plugin:jar", ":ignite:jar")
     val pluginJar = project(":plugin").tasks.named<Jar>("jar").flatMap { it.archiveFile }
     val igniteJar = project(":ignite").tasks.named<Jar>("jar").flatMap { it.archiveFile }
+    val publications = listOf("plugin" to "paper-plugin", "ignite" to "ignite-mod").map { (module, type) ->
+        project(":$module").tasks.named<GenerateMavenPom>("generatePomFileForMavenPublication") to type
+    }
+    dependsOn(publications.map { it.first })
     inputs.files(pluginJar, igniteJar)
+    inputs.files(publications.map { (task, _) -> task.map { it.destination } })
     inputs.property("version", project.version.toString())
     doLast {
         ZipFile(pluginJar.get().asFile).use { jar ->
@@ -121,19 +126,6 @@ val verifyArtifacts by tasks.registering {
             check(jar.getEntry("plugin.yml") == null) { "Plugin metadata must stay in the plugin JAR" }
             check(jar.getEntry("com/teamsneakymouse/sneakydiagnostics/SneakyDiagnosticsPlugin.class") == null) { "Companion must not bundle the plugin" }
         }
-    }
-}
-tasks.check { dependsOn(verifyArtifacts) }
-
-val verifyDeploymentMetadata by tasks.registering {
-    group = "verification"
-    description = "Checks the deployment type in each published Maven POM."
-    val publications = listOf("plugin" to "paper-plugin", "ignite" to "ignite-mod").map { (module, type) ->
-        project(":$module").tasks.named<GenerateMavenPom>("generatePomFileForMavenPublication") to type
-    }
-    dependsOn(publications.map { it.first })
-    inputs.files(publications.map { (task, _) -> task.map { it.destination } })
-    doLast {
         val parser = DocumentBuilderFactory.newInstance().apply {
             isNamespaceAware = true
             setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
@@ -148,7 +140,7 @@ val verifyDeploymentMetadata by tasks.registering {
         }
     }
 }
-tasks.check { dependsOn(verifyDeploymentMetadata) }
+tasks.check { dependsOn(verifyArtifacts) }
 
 tasks.register("publishAll") {
     group = "publishing"
