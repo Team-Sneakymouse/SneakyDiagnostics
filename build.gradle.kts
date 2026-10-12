@@ -3,6 +3,7 @@ import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.zip.ZipFile
+import javax.xml.parsers.DocumentBuilderFactory
 
 plugins { base }
 
@@ -55,6 +56,7 @@ subprojects {
                         "On-demand Paper server diagnostics for investigating TPS issues"
                         else "Optional Ignite instrumentation companion for SneakyDiagnostics")
                     url.set("https://github.com/Team-Sneakymouse/SneakyDiagnostics")
+                    properties.put("sneakyrp.deployment.type", if (project.name == "plugin") "paper-plugin" else "ignite-mod")
                     scm {
                         url.set("https://github.com/Team-Sneakymouse/SneakyDiagnostics")
                         connection.set("scm:git:git@github.com:Team-Sneakymouse/SneakyDiagnostics.git")
@@ -122,6 +124,31 @@ val verifyArtifacts by tasks.registering {
     }
 }
 tasks.check { dependsOn(verifyArtifacts) }
+
+val verifyDeploymentMetadata by tasks.registering {
+    group = "verification"
+    description = "Checks the deployment type in each published Maven POM."
+    val publications = listOf("plugin" to "paper-plugin", "ignite" to "ignite-mod").map { (module, type) ->
+        project(":$module").tasks.named<GenerateMavenPom>("generatePomFileForMavenPublication") to type
+    }
+    dependsOn(publications.map { it.first })
+    inputs.files(publications.map { (task, _) -> task.map { it.destination } })
+    doLast {
+        val parser = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+            setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)
+        }.newDocumentBuilder()
+        publications.forEach { (task, expectedType) ->
+            val pom = task.get().destination
+            val document = parser.parse(pom)
+            val values = document.getElementsByTagNameNS("http://maven.apache.org/POM/4.0.0", "sneakyrp.deployment.type")
+            check(values.length == 1 && values.item(0).textContent == expectedType) {
+                "$pom must declare sneakyrp.deployment.type=$expectedType"
+            }
+        }
+    }
+}
+tasks.check { dependsOn(verifyDeploymentMetadata) }
 
 tasks.register("publishAll") {
     group = "publishing"
