@@ -8,6 +8,9 @@ import com.teamsneakymouse.sneakydiagnostics.capture.ReportWriter;
 import com.teamsneakymouse.sneakydiagnostics.entity.EntityCensusCollector;
 import com.teamsneakymouse.sneakydiagnostics.scheduler.SchedulerCollector;
 import com.teamsneakymouse.sneakydiagnostics.timeline.TimelineCollector;
+import com.teamsneakymouse.sneakydiagnostics.api.Diagnostics;
+import com.teamsneakymouse.sneakydiagnostics.integration.PluginCollector;
+import com.teamsneakymouse.sneakydiagnostics.integration.ProviderRegistry;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -19,6 +22,7 @@ import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.plugin.ServicePriority;
 
 /** Command routing and coordinated starts; collectors own their capture state. */
 public final class SneakyDiagnosticsPlugin extends JavaPlugin {
@@ -26,21 +30,30 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
     private EntityCensusCollector entities;
     private ReportWriter reports;
     private CaptureCoordinator coordinator;
+    private ProviderRegistry providers;
 
     @Override public void onEnable() {
         reports = new ReportWriter(this);
         entities = new EntityCensusCollector(this, reports);
         var timeline = new TimelineCollector(reports);
         var scheduler = new SchedulerCollector(this, reports);
-        for (var collector : List.of(entities, timeline, scheduler)) collectors.put(collector.name(), collector);
+        providers = new ProviderRegistry(() -> {
+            if (!Bukkit.isPrimaryThread()) throw new IllegalStateException("Diagnostics lifecycle must run on the server thread");
+        });
+        var plugins = new PluginCollector(providers, reports);
+        for (var collector : List.of(entities, timeline, scheduler, plugins)) collectors.put(collector.name(), collector);
         coordinator = new CaptureCoordinator(List.copyOf(collectors.values()));
         getServer().getPluginManager().registerEvents(timeline, this);
         getServer().getPluginManager().registerEvents(scheduler, this);
-        getLogger().info("Ready; /diagnostics <entities|timeline|scheduler|all> <start|status|stop>. Collection is manual.");
+        getServer().getPluginManager().registerEvents(plugins, this);
+        getServer().getServicesManager().register(Diagnostics.class, providers, this, ServicePriority.Normal);
+        getLogger().info("Ready; /diagnostics <entities|timeline|scheduler|plugins|all> <start|status|stop>. Collection is manual.");
     }
 
     @Override public void onDisable() {
         for (var collector : collectors.values()) collector.stop("plugin_disable");
+        if (providers != null) providers.close();
+        getServer().getServicesManager().unregisterAll(this);
         if (reports != null) reports.close();
         collectors.clear();
     }
@@ -104,13 +117,13 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
     }
 
     private static void help(CommandSender sender, String label) {
-        sender.sendMessage("/" + label + " <entities|timeline|scheduler|all> <start|status|stop>; entities also supports resume.");
+        sender.sendMessage("/" + label + " <entities|timeline|scheduler|plugins|all> <start|status|stop>; entities also supports resume.");
     }
 
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         boolean legacy = command.getName().equalsIgnoreCase("entitycensus");
         if (!legacy && args.length == 1) {
-            return List.of("entities", "timeline", "scheduler", "all").stream()
+            return List.of("entities", "timeline", "scheduler", "plugins", "all").stream()
                     .filter(name -> allowed(sender, name, false) && name.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
         }
         String name = legacy ? "entities" : args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "";

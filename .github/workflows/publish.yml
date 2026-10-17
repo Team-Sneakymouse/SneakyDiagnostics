@@ -29,7 +29,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build and check both modules
+      - name: Build and check all modules
         run: ./gradlew build --no-daemon --console=plain
 
       - name: Fetch Maven credentials from Infisical
@@ -42,7 +42,7 @@ jobs:
           env-slug: prod
           secret-path: /Maven
 
-      - name: Publish both artifacts
+      - name: Publish plugin and companion
         run: |
           : "${MAVEN_USERNAME:?Infisical must provide MAVEN_USERNAME}"
           : "${MAVEN_PASSWORD:?Infisical must provide MAVEN_PASSWORD}"

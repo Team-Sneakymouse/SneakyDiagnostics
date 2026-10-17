@@ -1,0 +1,101 @@
+# Plugin diagnostics providers
+
+SneakyDiagnostics publishes `io.github.team-sneakymouse:SneakyDiagnostics-API:1.0.0`.
+The API contains one interface, `com.teamsneakymouse.sneakydiagnostics.api.Diagnostics`,
+with nested capture, provider, result and registration types. It has no Bukkit dependency.
+The SneakyDiagnostics plugin bundles the API and registers its implementation with Bukkit's
+`ServicesManager`. Provider plugins compile against the API and must **not shade or relocate it**.
+The API has a stable version independent of the plugin's commit-derived version.
+Release it with the manual `Publish Diagnostics API` workflow or `./gradlew publishApi`.
+Publish version 1.0.0 before the MagicSpells integration is built in CI. Ordinary
+`publishAll` runs publish the plugin and Ignite companion only, avoiding redeployment
+of an existing API release. Bump the version in the root build before releasing API changes.
+
+## Build and registration
+
+```groovy
+repositories {
+    maven { url = uri("https://maven.sneakyrp.com/releases") }
+}
+dependencies {
+    compileOnly("io.github.team-sneakymouse:SneakyDiagnostics-API:1.0.0")
+}
+```
+
+For local development before remote publication, run `./gradlew :api:publishToMavenLocal`
+in SneakyDiagnostics and add a `mavenLocal` repository restricted to this module in the provider.
+The API JAR is a library; install only the SneakyDiagnostics plugin JAR on the server.
+
+Add `softdepend: [SneakyDiagnostics]` to the provider's `plugin.yml`. Keep the API-dependent
+adapter in a separate class and load it only when SneakyDiagnostics is enabled. A hard
+`depend` is also supported when diagnostics is required for that plugin's operation.
+
+After the provider plugin has finished loading, register on the server thread:
+
+```java
+Diagnostics diagnostics = plugin.getServer().getServicesManager().load(Diagnostics.class);
+Diagnostics.Registration registration = diagnostics.register(
+    plugin.getName(), plugin.getPluginMeta().getVersion(), "my-measurements-1",
+    new Diagnostics.Provider() {
+        @Override public void start(Diagnostics.Capture capture) {
+            recorder.start(capture.startedNanos(), capture.seconds());
+        }
+        @Override public Diagnostics.Result stop(String reason) {
+            return new Diagnostics.Result(recorder.stopAndDetach(), true);
+        }
+    });
+```
+
+`recorder` above is the plugin's bounded measurement implementation. Close `registration`
+on the server thread **before** reload or disable clears measured state. Re-register after
+reload has completed. Close is idempotent; an old handle cannot remove a newer registration.
+The MagicSpells adapter is the first concrete example.
+
+## Capture contract
+
+- SneakyDiagnostics calls `start` and `stop` on the server thread. Registration, deregistration
+  and service shutdown also require that thread. Async measurements need a thread-safe recorder
+  that detaches its result on the server thread.
+- Use the supplied capture ID and `startedNanos + seconds * 1_000_000_000L` as the deadline.
+  Reject new measurements at that deadline even when no server tick arrives. Do not retain
+  a capture session in work that outlives the session; stable logical ownership labels may persist.
+- Providers registered at the start participate in `/diagnostics plugins start` and
+  `/diagnostics all start`. New registrations join the next capture. World filters affect
+  only the entity collector.
+- Do not schedule a stop or write a report. SneakyDiagnostics finishes at tick end, on manual
+  stop, or on disable. A failed start rolls back all attempted providers, including the one
+  whose start threw. Therefore `stop` must tolerate a partially failed start.
+- Deregistration during a capture immediately stops that provider with reason
+  `provider_unregistered`. Its partial result stays in the capture; other providers continue.
+- A provider exception becomes an explicit report error. Stop failures do not prevent other
+  providers from stopping. A start failure rejects and rolls back the coordinated capture.
+- Results must contain detached JSON values: string-keyed maps, lists, finite primitive numbers,
+  strings, booleans, and null. Do not return Bukkit objects, enums, custom records or mutable live
+  state. The service copies nested collections before returning control and rejects invalid values.
+- Per provider, the detached report allows at most 250,000 values, 16 nesting levels, 192-character
+  map keys and 1,024-character strings. Keep instrumentation itself bounded as well; these report
+  limits do not bound a provider's work before it returns.
+- `Result.complete` indicates coverage: set it false for overflow, dropped scopes, unavailable
+  measurements or unfinished work. The collector additionally marks early stops and errors incomplete.
+- Timings must state whether they measure inclusive wall time, self time, or CPU time, and document
+  overlaps. Plugin measurements can overlap Ignite scheduler measurements and must not be summed blindly.
+- Report plugin and instrumentation versions separately. Change the instrumentation version when
+  the measurement schema or meaning changes. Avoid player identifiers and payload contents.
+
+## Reports and verification
+
+`plugins-1.json` is written under the normal capture folder. Its `providers` array identifies
+each participating plugin/build/instrumentation version, start status, completion reason,
+coverage and detached measurements. No registered providers means no plugin measurements.
+It does not imply zero plugin cost. `/diagnostics plugins status` lists registered probes.
+
+Run the consumer/provider classloader check after building the instrumented MagicSpells plugin:
+
+```powershell
+.\gradlew.bat :plugin:verifyMagicSpells -PmagicSpellsJar=D:/Projects/MagicSpells-Workspace/MagicSpells/core/build/libs/MagicSpells-<version>.jar
+```
+
+This exercises the actual rebuilt adapter and recorder through the service, verifies shared API
+class identity, checks that MagicSpells did not shade the API, and preserves a partial result
+when the provider unregisters. It starts no Minecraft server. An isolated Paper smoke test
+is still needed for plugin loading, commands, real spell activity and overhead measurements.

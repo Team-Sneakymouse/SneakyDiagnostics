@@ -1,6 +1,6 @@
 # SneakyDiagnostics
 
-Paper 26.2+ diagnostics plugin for investigating TPS issues in custom plugins and scripts. Java 25 is required. Collection is manual. Available collectors cover entities, the tick timeline, public scheduler state, and optional Ignite scheduler instrumentation.
+Paper 26.2+ diagnostics plugin for investigating TPS issues in custom plugins and scripts. Java 25 is required. Collection is manual. Available collectors cover entities, the tick timeline, public scheduler state, registered plugin probes, and optional Ignite scheduler instrumentation.
 
 ## Build and install
 
@@ -15,14 +15,15 @@ For scheduler execution and cancellation attribution, copy `ignite/build/libs/Sn
 ## Repository layout
 
 ```text
-plugin/                   Paper plugin, collectors, commands, and existing tests
+api/                      Stable provider interface (SneakyDiagnostics-API:1.0.0)
+plugin/                   Paper plugin, collectors, commands, and tests
 ignite/                   Optional Ignite scheduler Mixins and hook tests
 build.gradle.kts          Shared version, Java toolchain, and publishing
 settings.gradle.kts       Module registration
-.github/workflows/        One build/publishing workflow for both artifacts
+.github/workflows/        One build/publishing workflow for all artifacts
 ```
 
-Root `build`, `check`, and `clean` cover both modules. Use `:plugin:build` or `:ignite:build` for a module-specific build. Both modules use the shared root version; `check` runs their tests. The bridge uses the JVM's local MBean server and JDK values; the plugin never loads companion classes and no shared module is needed.
+Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` or `:ignite:build` for a module-specific build. The plugin and Ignite companion use the shared root version; the API has its own stable version. The Ignite bridge uses the JVM's local MBean server and JDK values; the plugin never loads companion classes. Plugin providers use the typed API described below.
 
 ## Capture
 
@@ -33,6 +34,7 @@ Root `build`, `check`, and `clean` cover both modules. Use `:plugin:build` or `:
 /diagnostics entities resume 120
 /diagnostics timeline start 60
 /diagnostics scheduler start 60
+/diagnostics plugins start 60
 /diagnostics all start 60 world
 /diagnostics all status
 /diagnostics all stop
@@ -45,9 +47,10 @@ Root `build`, `check`, and `clean` cover both modules. Use `:plugin:build` or `:
 | `/diagnostics entities` | `start [world] [seconds]` or `start [seconds]` | `sneakydiagnostics.entities` |
 | `/diagnostics timeline` | `start [seconds]` | `sneakydiagnostics.timeline` |
 | `/diagnostics scheduler` | `start [seconds]` | `sneakydiagnostics.scheduler` |
+| `/diagnostics plugins` | `start [seconds]` | `sneakydiagnostics.plugins` |
 | `/diagnostics all` | `start [seconds] [world]` | `sneakydiagnostics.all` |
 
-All permissions default to operators. `sneakydiagnostics.all` includes the three individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
+All permissions default to operators. `sneakydiagnostics.all` includes the four individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
 
 `all start` validates every collector before starting, and shares a capture ID, timestamp, and monotonic clock across all reports. It rejects busy collectors, including pending report writes, and rolls back partial starts. Individual captures can overlap independently; starting or resuming another capture is blocked while a coordinated capture is still active. `all stop` stops all active collectors, including independently started ones. A census may finish before the requested time if it reaches the end of its traversal; timeline and scheduler collection continue for their full window.
 
@@ -55,29 +58,29 @@ Completion logs absolute paths under `plugins/SneakyDiagnostics/reports/<capture
 
 An unfinished census can be continued with `/diagnostics entities resume [seconds]` after its previous report finishes writing. Resume continues the same cursor and deduplication set, writes `entities-2.json` and subsequent segments under the same capture ID, and includes pauses in observation offsets. Entities, groups, and sections in each file describe that segment; coverage counters and unique attempts are cumulative. Combine all segments when analyzing the whole census. Starting a new census discards the paused cursor. Resume state exists only in memory and is discarded on plugin disable/restart.
 
-The first useful capture is during the sustained 11–15 TPS condition. Run it alongside `/ms perf start 60` from the instrumented MagicSpells build, and note the capture times. Repeat the census after one controlled change when player locations and activity are comparable.
+The first useful capture is during the sustained 11–15 TPS condition. With the instrumented MagicSpells build installed, `/diagnostics all start 60` also collects spell measurements under the same capture ID. `/diagnostics plugins status` lists registered probes. Repeat after one controlled change when player locations and activity are comparable.
 
 ## Publishing and development
 
 The public repository is [Team-Sneakymouse/SneakyDiagnostics](https://github.com/Team-Sneakymouse/SneakyDiagnostics).
-Pushes to `main` and manual runs of the `Publish Maven` workflow build and check both modules before publishing both artifact sets (JAR, sources JAR, and POM) to `https://maven.sneakyrp.com/releases`. Each remote publication depends on the repository's complete checks.
+Pushes to `main` and manual runs of the `Publish Maven` workflow build and check all modules before publishing the plugin and companion artifact sets (JAR, sources JAR, and POM) to `https://maven.sneakyrp.com/releases`. Each remote publication depends on the repository's complete checks.
 
-Maven coordinates are `io.github.team-sneakymouse:SneakyDiagnostics:<version>` for the plugin and `io.github.team-sneakymouse:SneakyDiagnostics-Ignite:<version>` for the companion. The plugin's existing coordinates are preserved. Both use the same version derived from the commit date in UTC and its 12-character hash: `yyyy.MM.dd-<hash>`. A committed Git checkout is required to build.
+Maven coordinates are `io.github.team-sneakymouse:SneakyDiagnostics:<version>` for the plugin and `io.github.team-sneakymouse:SneakyDiagnostics-Ignite:<version>` for the companion. The plugin's existing coordinates are preserved. The plugin and companion use the same version derived from the commit date in UTC and its 12-character hash: `yyyy.MM.dd-<hash>`. A committed Git checkout is required to build. The provider library is `io.github.team-sneakymouse:SneakyDiagnostics-API:1.0.0`; it has an independent stable interface version and is bundled inside the Paper plugin. Release it once per API version through the manual `Publish Diagnostics API` workflow or `publishApi`; it is excluded from ordinary `publishAll` runs. Publish the first API release before building the MagicSpells integration in CI.
 
-Each published Maven POM includes a custom `sneakyrp.deployment.type` property for deployment automation:
+Each deployable plugin/companion Maven POM includes a custom `sneakyrp.deployment.type` property for deployment automation:
 
 | Artifact | Property value | Installation directory |
 | --- | --- | --- |
 | `SneakyDiagnostics` | `paper-plugin` | `plugins/` |
 | `SneakyDiagnostics-Ignite` | `ignite-mod` | Ignite's `mods/` |
 
-Read the version's `.pom` alongside its main JAR and select installation handling by this property. For example, the companion declares `<properties><sneakyrp.deployment.type>ignite-mod</sneakyrp.deployment.type></properties>`. This is a custom deployment convention, not Maven's packaging type; both artifacts remain JARs. The property is in the POM, not repository-level `maven-metadata.xml` or Gradle's `.module` file. Existing releases lack it; deployment systems can retain their legacy behavior for missing values and should reject unknown explicit values.
+Read the version's `.pom` alongside its main JAR and select installation handling by this property. For example, the companion declares `<properties><sneakyrp.deployment.type>ignite-mod</sneakyrp.deployment.type></properties>`. The API library has no deployment property and must not be installed as a plugin. This is a custom deployment convention, not Maven's packaging type; both artifacts remain JARs. The property is in the POM, not repository-level `maven-metadata.xml` or Gradle's `.module` file. Existing releases lack it; deployment systems can retain their legacy behavior for missing values and should reject unknown explicit values.
 
 CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have access to `INFISICAL_IDENTITY_ID` and `INFISICAL_DOMAIN` GitHub Actions secrets, and the identity must authorize this repository. Infisical project `lords-of-minecraft`, environment `prod`, path `/Maven` must provide `MAVEN_USERNAME` and `MAVEN_PASSWORD`.
 
-For publishing from a local checkout, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishAll`. The original `publishMavenPublicationToSneakyrpRepository` command remains an alias that publishes both artifacts. Never commit credentials. Root `publishToMavenLocal` can verify both publications without remote credentials.
+For publishing from a local checkout, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishAll`. The original `publishMavenPublicationToSneakyrpRepository` command remains an alias that publishes the plugin and companion. Never commit credentials. Root `publishToMavenLocal` can verify all three publications without remote credentials.
 
-`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, and `scheduler` own their collection state. The Paper plugin uses public APIs; the optional Ignite companion instruments scheduler internals. There is no automatic capture.
+`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, `scheduler`, and `integration` own their collection state. The Paper plugin uses public APIs; the optional Ignite companion instruments scheduler internals. There is no automatic capture.
 
 The original entity fields, chunk groups, and `entities-*.json` filename pattern are preserved; capture identity, coverage, and sections are additive. Files now live in capture subdirectories; resumed files contain separate segments. Update collection/analysis scripts to discover those directories and combine segments rather than assuming one file is the entire census. Remove the old `SneakyEntityCensus` JAR when installing this plugin to avoid duplicate `/entitycensus` registrations.
 
@@ -117,13 +120,23 @@ At most once per wall-clock second at tick end, capture pending sync/async tasks
 
 New/missing task IDs between complete snapshots describe observed churn. They are not exact creation, execution, or cancellation rates, and short-lived tasks between snapshots are missed. Async state can also change during a read. Diagnostics' own pending census task is included. Grouping is capped at 50,000 examined tasks, 5,000 workers, and 512 groups per snapshot; truncation and overflow counts are explicit, and truncated task-ID sets cannot produce churn comparisons. The Bukkit calls copy their full lists before these caps apply, so snapshot overhead includes potentially expensive non-preemptible list copies.
 
+## Plugin measurements
+
+The instrumented MagicSpells build (based on `b462388fcc10`, published baseline `2026.10.16-b462388fcc10`) registers a provider through the typed SneakyDiagnostics API. `/diagnostics plugins start 60` collects its existing spell, subspell, passive, event, scheduled-task, reagent and inventory-scan timings. `/diagnostics all start 60` includes the same measurements with the entities, timeline and scheduler captures.
+
+Reports use `plugins-1.json` in the shared capture folder. Each provider reports its build and instrumentation version, completion reason, coverage and measurements. MagicSpells includes calls, inclusive/self/max nanoseconds, inventory slots and item-match counts. Timings are server-thread wall time; async execution is excluded. Inclusive rows overlap one another and scheduler probes. The recorder retains at most 4,096 operation/spell/detail keys and reports drops explicitly.
+
+Install both rebuilt plugin JARs for this integration. The baseline MagicSpells release does not expose the new provider. The instrumented build removes `/ms perf` and its standalone reports; capture control and report writing belong to SneakyDiagnostics. MagicSpells still runs without SneakyDiagnostics, with measurements disabled. No API JAR needs to be installed separately. Close/reload during capture preserves the provider's partial results and marks it incomplete.
+
+See [the provider guide](docs/plugin-providers.md) for the reusable interface, build dependency, lifecycle contract and classloader verification.
+
 ## Deeper probes
 
 With the companion installed, `/diagnostics scheduler start` and `/diagnostics all start` also capture task creation, sync/async runnable and consumer execution, callable execution, individual/plugin cancellation requests, repeated individual cancellation requests, and deferred cancellation scans. The scheduler report's `ignite` section groups these by owner, body class, sync flag, event, and cancellation caller. It includes started/completed/throwing counts, total/max duration, observation offsets, overflow counters, and unfinished scopes at stop. Without the companion, public snapshots remain available.
 
 Probe state is bounded to 2,048 groups and 100,000 entries in each task-identity/cancellation map, with labels capped at 192 characters. Hooks bypass aggregation outside captures; captures expire on their monotonic deadline even when no tick arrives. Execution durations are inclusive wall time, not CPU time. Cancellation requests do not count removed tasks, and request/deferred/execution scopes can overlap. Creation timing measures probe bookkeeping. Unknown targets can predate capture; a caller frame is evidence of a call site, not proven plugin ownership. Read report notes before comparing totals.
 
-The remaining measurements are spatial-query caller/radius/candidate counts, altered-block history lifecycle, and separate undo/particle timings. Bounded changes in MagicSpells and SneakyConfigurableVoice can supply logical spell/cast/lifecycle context. No sibling plugins have been modified. [Ignite](https://github.com/vectrix-space/ignite) supplies class transformation; compatibility contracts and a runtime proof belong in the [companion module](ignite/README.md).
+The instrumented MagicSpells integration supplies its existing spell/event/task measurements. Dedicated spatial-query caller/radius/candidate counts, altered-block history lifecycle, separate undo/particle timings and voice probes remain future work. [Ignite](https://github.com/vectrix-space/ignite) supplies class transformation; compatibility contracts and a runtime proof belong in the [companion module](ignite/README.md).
 
 ## Verification
 

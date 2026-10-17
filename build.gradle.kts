@@ -19,8 +19,12 @@ subprojects {
     apply(plugin = "java")
     apply(plugin = "maven-publish")
     group = rootProject.group
-    version = rootProject.version
-    val artifactName = if (name == "plugin") rootProject.name else "${rootProject.name}-Ignite"
+    version = if (name == "api") "1.0.0" else rootProject.version
+    val artifactName = when (name) {
+        "api" -> "${rootProject.name}-API"
+        "plugin" -> rootProject.name
+        else -> "${rootProject.name}-Ignite"
+    }
     repositories {
         mavenCentral()
         maven("https://repo.papermc.io/repository/maven-public/")
@@ -49,11 +53,13 @@ subprojects {
                 from(components["java"])
                 pom {
                     name.set(artifactName)
-                    description.set(if (project.name == "plugin")
-                        "On-demand Paper server diagnostics for investigating TPS issues"
-                        else "Optional Ignite instrumentation companion for SneakyDiagnostics")
+                    description.set(when (project.name) {
+                        "api" -> "Provider interface for optional SneakyDiagnostics integrations"
+                        "plugin" -> "On-demand Paper server diagnostics for investigating TPS issues"
+                        else -> "Optional Ignite instrumentation companion for SneakyDiagnostics"
+                    })
                     url.set("https://github.com/Team-Sneakymouse/SneakyDiagnostics")
-                    properties.put("sneakyrp.deployment.type", if (project.name == "plugin") "paper-plugin" else "ignite-mod")
+                    if (project.name != "api") properties.put("sneakyrp.deployment.type", if (project.name == "plugin") "paper-plugin" else "ignite-mod")
                     scm {
                         url.set("https://github.com/Team-Sneakymouse/SneakyDiagnostics")
                         connection.set("scm:git:git@github.com:Team-Sneakymouse/SneakyDiagnostics.git")
@@ -73,14 +79,20 @@ subprojects {
     tasks.withType<PublishToMavenRepository>().configureEach { dependsOn(rootProject.tasks.named("check")) }
 }
 
-tasks.assemble { dependsOn(":plugin:assemble", ":ignite:assemble") }
-tasks.check { dependsOn(":plugin:check", ":ignite:check") }
-tasks.clean { dependsOn(":plugin:clean", ":ignite:clean") }
+tasks.assemble { dependsOn(":api:assemble", ":plugin:assemble", ":ignite:assemble") }
+tasks.check { dependsOn(":api:check", ":plugin:check", ":ignite:check") }
+tasks.clean { dependsOn(":api:clean", ":plugin:clean", ":ignite:clean") }
 
 tasks.register("publishAll") {
     group = "publishing"
-    description = "Checks both modules and publishes both Maven artifacts."
+    description = "Checks all modules and publishes the plugin and companion."
     dependsOn(":plugin:publishMavenPublicationToSneakyrpRepository", ":ignite:publishMavenPublicationToSneakyrpRepository")
+}
+
+tasks.register("publishApi") {
+    group = "publishing"
+    description = "Releases the independently versioned provider API; bump its version before another release."
+    dependsOn(":api:publishMavenPublicationToSneakyrpRepository")
 }
 // Preserve the original repository-level publishing command.
 tasks.register("publishMavenPublicationToSneakyrpRepository") {
@@ -89,5 +101,5 @@ tasks.register("publishMavenPublicationToSneakyrpRepository") {
 }
 tasks.register("publishToMavenLocal") {
     group = "publishing"
-    dependsOn("check", ":plugin:publishToMavenLocal", ":ignite:publishToMavenLocal")
+    dependsOn("check", ":api:publishToMavenLocal", ":plugin:publishToMavenLocal", ":ignite:publishToMavenLocal")
 }

@@ -7,5 +7,5 @@ pluginManagement {
 
 rootProject.name = "SneakyDiagnostics"
 
-include("plugin", "ignite")
+include("api", "plugin", "ignite")
 
