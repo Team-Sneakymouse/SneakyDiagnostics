@@ -44,3 +44,18 @@ tasks.processResources {
     inputs.property("version", project.version.toString())
     filesMatching("plugin.yml") { expand("version" to project.version.toString()) }
 }
+
+// Opt-in contract/export proof against a real bundled spark JAR, without starting Minecraft.
+tasks.register<Test>("verifySpark") {
+    group = "verification"
+    description = "Verifies the profiling adapter against a supplied spark JAR."
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    filter { includeTestsMatching("*SparkJarTest") }
+    val jar = providers.gradleProperty("sparkJar")
+    if (jar.isPresent) {
+        inputs.file(jar)
+        systemProperty("sparkJar", jar.get())
+    }
+    doFirst { require(jar.isPresent) { "Pass -PsparkJar=<absolute path to spark-paper JAR>" } }
+}

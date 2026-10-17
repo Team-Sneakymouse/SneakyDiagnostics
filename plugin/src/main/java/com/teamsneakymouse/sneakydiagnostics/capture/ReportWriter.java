@@ -17,7 +17,7 @@ import java.util.logging.Level;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 
-/** Accepts detached reports only; no Bukkit access in the serialization worker. */
+/** Serializes detached reports and optional spark exports; Bukkit headers are assembled by the caller. */
 public final class ReportWriter implements ReportSink, AutoCloseable {
     private final JavaPlugin plugin;
     private final Set<String> pending = ConcurrentHashMap.newKeySet();
@@ -48,14 +48,43 @@ public final class ReportWriter implements ReportSink, AutoCloseable {
     }
 
     public void write(String collector, CaptureContext context, int segment, Supplier<Map<String, Object>> detachedReport) {
+        write(collector, context, segment, detachedReport, null, null);
+    }
+
+    @Override public void write(String collector, CaptureContext context, int segment, Supplier<Map<String, Object>> detachedReport,
+                                String artifactName, Supplier<byte[]> artifact) {
         if (!pending.add(collector)) throw new IllegalStateException("Report already pending: " + collector);
         Path path = plugin.getDataFolder().toPath().resolve("reports").resolve(context.id())
                 .resolve(collector + "-" + segment + ".json");
         worker.execute(() -> {
             try {
+                var report = detachedReport.get();
+                byte[] artifactBytes = null;
+                if (artifact != null) {
+                    try {
+                        // Finalize an owned profiler even if the report directory cannot be created.
+                        artifactBytes = artifact.get();
+                    } catch (RuntimeException | LinkageError e) {
+                        report.put("complete", false);
+                        report.put("exportError", e.toString());
+                        plugin.getLogger().log(Level.WARNING, "Cannot export " + artifactName, e);
+                    }
+                }
                 Files.createDirectories(path.getParent());
+                if (artifactBytes != null) {
+                    Path artifactPath = path.resolveSibling(artifactName);
+                    try {
+                        Files.write(artifactPath, artifactBytes, StandardOpenOption.CREATE_NEW);
+                        report.put("profileFile", artifactName);
+                        plugin.getLogger().info("Saved " + artifactPath.toAbsolutePath());
+                    } catch (IOException | RuntimeException | LinkageError e) {
+                        report.put("complete", false);
+                        report.put("exportError", e.toString());
+                        plugin.getLogger().log(Level.WARNING, "Cannot save " + artifactPath, e);
+                    }
+                }
                 try (var out = Files.newBufferedWriter(path, StandardOpenOption.CREATE_NEW)) {
-                    new GsonBuilder().setPrettyPrinting().create().toJson(detachedReport.get(), out);
+                    new GsonBuilder().setPrettyPrinting().create().toJson(report, out);
                 }
                 plugin.getLogger().info("Saved " + path.toAbsolutePath());
             } catch (IOException | RuntimeException e) {

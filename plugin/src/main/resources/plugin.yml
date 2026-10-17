@@ -5,11 +5,12 @@ api-version: '26.2'
 description: On-demand diagnostics for investigating server TPS issues
 author: Team Sneakymouse
 website: https://github.com/Team-Sneakymouse/SneakyDiagnostics
+softdepend: [spark]
 commands:
   sneakydiagnostics:
     aliases: [diagnostics]
     description: Collect server diagnostics
-    usage: /<command> <entities|timeline|scheduler|plugins|all> <start|status|stop>
+    usage: /<command> <entities|timeline|scheduler|plugins|spark|all> <start|status|stop>
   entitycensus:
     description: Collect a loaded-entity census (compatibility command)
     usage: /<command> <start [world] [seconds]|resume [seconds]|status|stop>
@@ -23,6 +24,10 @@ permissions:
       sneakydiagnostics.timeline: true
       sneakydiagnostics.scheduler: true
       sneakydiagnostics.plugins: true
+      sneakydiagnostics.spark: true
+  sneakydiagnostics.spark:
+    description: Capture a local spark execution profile
+    default: op
   sneakydiagnostics.plugins:
     description: Collect measurements from registered plugin probes
     default: op

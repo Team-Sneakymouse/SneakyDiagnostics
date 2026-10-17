@@ -1,6 +1,6 @@
 # SneakyDiagnostics
 
-Paper 26.2+ diagnostics plugin for investigating TPS issues in custom plugins and scripts. Java 25 is required. Collection is manual. Available collectors cover entities, the tick timeline, public scheduler state, registered plugin probes, and optional Ignite scheduler instrumentation.
+Paper 26.2+ diagnostics plugin for investigating TPS issues in custom plugins and scripts. Java 25 is required. Collection is manual. Available collectors cover entities, the tick timeline, public scheduler state, registered plugin probes, optional spark profiles, and optional Ignite scheduler instrumentation.
 
 ## Build and install
 
@@ -35,6 +35,7 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 /diagnostics timeline start 60
 /diagnostics scheduler start 60
 /diagnostics plugins start 60
+/diagnostics spark start 120
 /diagnostics all start 60 world
 /diagnostics all status
 /diagnostics all stop
@@ -48,9 +49,10 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 | `/diagnostics timeline` | `start [seconds]` | `sneakydiagnostics.timeline` |
 | `/diagnostics scheduler` | `start [seconds]` | `sneakydiagnostics.scheduler` |
 | `/diagnostics plugins` | `start [seconds]` | `sneakydiagnostics.plugins` |
+| `/diagnostics spark` | `start [seconds]` | `sneakydiagnostics.spark` |
 | `/diagnostics all` | `start [seconds] [world]` | `sneakydiagnostics.all` |
 
-All permissions default to operators. `sneakydiagnostics.all` includes the four individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
+All permissions default to operators. `sneakydiagnostics.all` includes the five individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
 
 `all start` validates every collector before starting, and shares a capture ID, timestamp, and monotonic clock across all reports. It rejects busy collectors, including pending report writes, and rolls back partial starts. Individual captures can overlap independently; starting or resuming another capture is blocked while a coordinated capture is still active. `all stop` stops all active collectors, including independently started ones. A census may finish before the requested time if it reaches the end of its traversal; timeline and scheduler collection continue for their full window.
 
@@ -113,6 +115,24 @@ Paper API reference: [entity tracking](https://jd.papermc.io/paper/26.2/org/bukk
 ## Tick timeline
 
 Paper tick-end events are grouped into one-second windows using the shared capture clock. Each window reports observed tick count, mean/min/max duration, counts over 50/100 ms, and first/last server tick numbers. Empty seconds remain gaps rather than invented zero-cost ticks. Offsets describe tick-end observations; Paper's duration excludes remaining tick-end listeners and idle sleep. These are server-wide measurements, not per-plugin CPU timings. Handler collection overhead is recorded separately; report dispatch is outside that timing.
+
+## spark profiles
+
+`/diagnostics all start [seconds]` attempts a spark execution profile for the same capture window. `/diagnostics spark start [seconds]` captures only spark. Both default to 60 seconds. Reports contain `spark-1.json` and, on successful export, `profile.sparkprofile` in the shared capture folder. Open the binary file by dragging it into [spark's viewer](https://spark.lucko.me/). Nothing is uploaded automatically.
+
+When spark is idle, diagnostics starts a dedicated server-thread execution sampler at a 4 ms interval with no slow-tick threshold. Like the other collectors, its deadline is checked at tick end; a stalled tick can extend collection. Stop, rollback, and plugin disable finalize owned sessions; finalization and export run on the report writer thread. Waiting for that writer can also extend sampling; `exportAfterMillis` and `snapshotAfterMillis` expose the actual export/finalization offsets. Pending exports block a new spark capture. Administrators can still stop or replace the owned sampler through spark; diagnostics detects a changed session and marks its report partial.
+
+An existing execution sampler is reused when it includes the server thread and does not filter for slow ticks. Its settings and lifecycle are preserved: diagnostics never stops a shared session. Allocation, lock, slow-tick-only, and server-thread-excluding profiles are skipped with an explicit reason. Missing, disabled, or incompatible spark also produces a skip report while the other collectors continue.
+
+Reused exports are labelled `coverage: shared_history`, with `owned: false`. They can contain samples from before the diagnostics capture, omit the newest buffered samples, or lose older samples as spark rotates its retained history. Export happens asynchronously after the diagnostics window, so consult the profile's own sampling windows for actual coverage. `complete` describes normal diagnostics completion and successful export, not an exact match between shared sample history and the requested window. World filters apply only to the entity collector.
+
+spark's public API exposes metrics but no profiling lifecycle/export interface. The optional adapter discovers the public Bukkit service where available, otherwise the standalone plugin or Paper's bundled module, and calls spark implementation methods directly without command dispatch. Reflection is isolated to this adapter; no spark classes or dependencies are bundled into diagnostics. Compatibility is checked by method contracts and failures are reported rather than replacing a running profiler.
+
+The export/ownership proof can run against a local bundled spark JAR without starting Minecraft:
+
+```powershell
+.\gradlew.bat :plugin:verifySpark -PsparkJar="C:/path/to/spark-paper.jar"
+```
 
 ## Scheduler snapshots
 

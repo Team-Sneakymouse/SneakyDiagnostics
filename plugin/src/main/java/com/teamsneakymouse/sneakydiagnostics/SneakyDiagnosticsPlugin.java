@@ -11,6 +11,8 @@ import com.teamsneakymouse.sneakydiagnostics.timeline.TimelineCollector;
 import com.teamsneakymouse.sneakydiagnostics.api.Diagnostics;
 import com.teamsneakymouse.sneakydiagnostics.integration.PluginCollector;
 import com.teamsneakymouse.sneakydiagnostics.integration.ProviderRegistry;
+import com.teamsneakymouse.sneakydiagnostics.spark.SparkCollector;
+import com.teamsneakymouse.sneakydiagnostics.spark.ReflectiveSparkProfiler;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -41,13 +43,15 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
             if (!Bukkit.isPrimaryThread()) throw new IllegalStateException("Diagnostics lifecycle must run on the server thread");
         });
         var plugins = new PluginCollector(providers, reports);
-        for (var collector : List.of(entities, timeline, scheduler, plugins)) collectors.put(collector.name(), collector);
+        var spark = new SparkCollector(new ReflectiveSparkProfiler(getServer()), reports);
+        for (var collector : List.of(entities, timeline, scheduler, plugins, spark)) collectors.put(collector.name(), collector);
         coordinator = new CaptureCoordinator(List.copyOf(collectors.values()));
         getServer().getPluginManager().registerEvents(timeline, this);
         getServer().getPluginManager().registerEvents(scheduler, this);
         getServer().getPluginManager().registerEvents(plugins, this);
+        getServer().getPluginManager().registerEvents(spark, this);
         getServer().getServicesManager().register(Diagnostics.class, providers, this, ServicePriority.Normal);
-        getLogger().info("Ready; /diagnostics <entities|timeline|scheduler|plugins|all> <start|status|stop>. Collection is manual.");
+        getLogger().info("Ready; /diagnostics <entities|timeline|scheduler|plugins|spark|all> <start|status|stop>. Collection is manual.");
     }
 
     @Override public void onDisable() {
@@ -117,13 +121,13 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
     }
 
     private static void help(CommandSender sender, String label) {
-        sender.sendMessage("/" + label + " <entities|timeline|scheduler|plugins|all> <start|status|stop>; entities also supports resume.");
+        sender.sendMessage("/" + label + " <entities|timeline|scheduler|plugins|spark|all> <start|status|stop>; entities also supports resume.");
     }
 
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         boolean legacy = command.getName().equalsIgnoreCase("entitycensus");
         if (!legacy && args.length == 1) {
-            return List.of("entities", "timeline", "scheduler", "plugins", "all").stream()
+            return List.of("entities", "timeline", "scheduler", "plugins", "spark", "all").stream()
                     .filter(name -> allowed(sender, name, false) && name.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
         }
         String name = legacy ? "entities" : args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "";
