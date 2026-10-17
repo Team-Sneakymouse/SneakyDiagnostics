@@ -26,6 +26,20 @@ tasks.register<Test>("verifyMagicSpells") {
     doFirst { require(jar.isPresent) { "Pass -PmagicSpellsJar=<absolute path to rebuilt deployable MagicSpells JAR>" } }
 }
 
+tasks.register<Test>("verifyVoice") {
+    description = "Verifies the rebuilt SneakyConfigurableVoice provider in a separate classloader."
+    group = "verification"
+    testClassesDirs = sourceSets.test.get().output.classesDirs
+    classpath = sourceSets.test.get().runtimeClasspath
+    filter { includeTestsMatching("*VoiceJarTest") }
+    val jar = providers.gradleProperty("voiceJar")
+    if (jar.isPresent) {
+        inputs.file(jar)
+        systemProperty("voiceJar", jar.get())
+    }
+    doFirst { require(jar.isPresent) { "Pass -PvoiceJar=<absolute path to rebuilt SneakyConfigurableVoice JAR>" } }
+}
+
 tasks.processResources {
     inputs.property("version", project.version.toString())
     filesMatching("plugin.yml") { expand("version" to project.version.toString()) }

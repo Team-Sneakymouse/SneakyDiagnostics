@@ -49,7 +49,9 @@ Diagnostics.Registration registration = diagnostics.register(
 `recorder` above is the plugin's bounded measurement implementation. Close `registration`
 on the server thread **before** reload or disable clears measured state. Re-register after
 reload has completed. Close is idempotent; an old handle cannot remove a newer registration.
-The MagicSpells adapter is the first concrete example.
+MagicSpells and SneakyConfigurableVoice provide concrete examples. MagicSpells records
+server-thread scopes; Voice uses a fixed-size, thread-safe recorder for overlapping
+microphone handlers and scheduled delivery.
 
 ## Capture contract
 
@@ -99,3 +101,12 @@ This exercises the actual rebuilt adapter and recorder through the service, veri
 class identity, checks that MagicSpells did not shade the API, and preserves a partial result
 when the provider unregisters. It starts no Minecraft server. An isolated Paper smoke test
 is still needed for plugin loading, commands, real spell activity and overhead measurements.
+
+For the rebuilt SneakyConfigurableVoice JAR, use the corresponding check:
+
+```powershell
+.\gradlew.bat :plugin:verifyVoice -PvoiceJar=D:/Projects/SneakyConfigurableVoice/build/libs/SneakyConfigurableVoice-<version>.jar
+```
+
+It exercises the actual voice recorder/provider through the same service and checks the
+detached report against the consumer's limits, including partial results on unregister.

@@ -130,13 +130,15 @@ Install both rebuilt plugin JARs for this integration. The baseline MagicSpells 
 
 See [the provider guide](docs/plugin-providers.md) for the reusable interface, build dependency, lifecycle contract and classloader verification.
 
+The instrumented SneakyConfigurableVoice build registers a `voice-routing-1` provider with the same commands. Its four fixed groups cover normal, whisper, shout and broadcast. Measurements include microphone-event volume, handler/dispatch/query wall time, submission-to-start delay, effective ranges, player-query candidates/matches, recipient/send counts and unstarted/in-flight work at the capture boundary. Collection is thread-safe, bounded and omits player identities and audio payloads. Dispatches scheduled before capture are counted without fabricating queue delay. Timings overlap and send calls returning normally do not prove network delivery. See the voice checkout's README for detailed field meanings and a live smoke checklist.
+
 ## Deeper probes
 
 With the companion installed, `/diagnostics scheduler start` and `/diagnostics all start` also capture task creation, sync/async runnable and consumer execution, callable execution, individual/plugin cancellation requests, repeated individual cancellation requests, and deferred cancellation scans. The scheduler report's `ignite` section groups these by owner, body class, sync flag, event, and cancellation caller. It includes started/completed/throwing counts, total/max duration, observation offsets, overflow counters, and unfinished scopes at stop. Without the companion, public snapshots remain available.
 
 Probe state is bounded to 2,048 groups and 100,000 entries in each task-identity/cancellation map, with labels capped at 192 characters. Hooks bypass aggregation outside captures; captures expire on their monotonic deadline even when no tick arrives. Execution durations are inclusive wall time, not CPU time. Cancellation requests do not count removed tasks, and request/deferred/execution scopes can overlap. Creation timing measures probe bookkeeping. Unknown targets can predate capture; a caller frame is evidence of a call site, not proven plugin ownership. Read report notes before comparing totals.
 
-The instrumented MagicSpells integration supplies its existing spell/event/task measurements. Dedicated spatial-query caller/radius/candidate counts, altered-block history lifecycle, separate undo/particle timings and voice probes remain future work. [Ignite](https://github.com/vectrix-space/ignite) supplies class transformation; compatibility contracts and a runtime proof belong in the [companion module](ignite/README.md).
+The instrumented MagicSpells integration supplies its existing spell/event/task measurements. Dedicated MagicSpells spatial-query caller/radius/candidate counts, altered-block history lifecycle and separate undo/particle timings remain future work. [Ignite](https://github.com/vectrix-space/ignite) supplies class transformation; compatibility contracts and a runtime proof belong in the [companion module](ignite/README.md).
 
 ## Verification
 
