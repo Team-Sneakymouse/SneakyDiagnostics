@@ -12,6 +12,46 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @EnabledIfSystemProperty(named = "magicSpellsJar", matches = ".+")
 class MagicSpellsJarTest {
+    @Test void saturatedDetailsKeepEveryAggregateAndFitTheRealConsumerReportLimit() throws Exception {
+        Path jar = Path.of(System.getProperty("magicSpellsJar"));
+        try (var loader = new URLClassLoader(new java.net.URL[]{jar.toUri().toURL()}, Diagnostics.class.getClassLoader())) {
+            var recorderType = loader.loadClass("com.nisovin.magicspells.util.performance.PerformanceRecorder");
+            var probeType = loader.loadClass("com.nisovin.magicspells.util.performance.MagicSpellsProbe");
+            var counterType = loader.loadClass(recorderType.getName() + "$Counter");
+            var recorder = recorderType.getConstructor().newInstance();
+            var constructor = probeType.getDeclaredConstructor(recorderType, java.util.Set.class);
+            constructor.setAccessible(true);
+            var probe = (Diagnostics.Provider) constructor.newInstance(recorder, java.util.Set.of("stress"));
+            var registry = new ProviderRegistry(() -> {});
+            registry.register("MagicSpells", "rebuilt", "magicspells-execution-2", probe);
+            registry.start(new Diagnostics.Capture("saturated", "now", System.nanoTime(), 5, 60));
+            var enter = recorderType.getMethod("enter", String.class, String.class, String.class);
+            var match = recorderType.getMethod("matchCall");
+            var add = enter.getReturnType().getMethod("add", counterType, long.class);
+            Object inventory = counterType.getEnumConstants()[0];
+            for (int i = 0; i < 30_000; i++) {
+                try (var scope = (AutoCloseable) enter.invoke(recorder, "spell", "stress", "detail-" + i)) {
+                    match.invoke(recorder);
+                    add.invoke(scope, inventory, 1L);
+                }
+            }
+            var report = registry.stop("completed").getFirst();
+            assertFalse(report.containsKey("error"), () -> String.valueOf(report.get("error")));
+            var measurements = (Map<?, ?>) report.get("measurements");
+            assertEquals(true, measurements.get("totalsComplete"));
+            assertEquals(true, measurements.get("spellTotalsComplete"));
+            assertEquals(false, measurements.get("detailComplete"));
+            assertTrue((Long) measurements.get("droppedScopes") > 0);
+            assertTrue(((List<?>) measurements.get("rows")).size() > 4096);
+            var totals = (Map<?, ?>) measurements.get("totals");
+            assertEquals(30_000L, totals.get("calls"));
+            assertEquals(Map.of("MATCH_CALLS", 30_000L, "INVENTORY_SLOTS", 30_000L), totals.get("counters"));
+            var spells = (List<?>) measurements.get("spellTotals");
+            assertEquals(1, spells.size());
+            assertEquals(30_000L, ((Map<?, ?>) spells.getFirst()).get("calls"));
+        }
+    }
+
     @Test void rebuiltPluginUsesTheConsumersApiAndDeliversItsRealMeasurementsAcrossClassloaders() throws Exception {
         Path jar = Path.of(System.getProperty("magicSpellsJar"));
         try (var archive = new JarFile(jar.toFile())) {
@@ -23,11 +63,11 @@ class MagicSpellsJarTest {
             assertSame(loader, recorderType.getClassLoader());
             assertSame(Diagnostics.class, loader.loadClass(Diagnostics.class.getName()));
             var recorder = recorderType.getConstructor().newInstance();
-            var constructor = probeType.getDeclaredConstructor(recorderType);
+            var constructor = probeType.getDeclaredConstructor(recorderType, java.util.Set.class);
             constructor.setAccessible(true);
-            var probe = (Diagnostics.Provider) constructor.newInstance(recorder);
+            var probe = (Diagnostics.Provider) constructor.newInstance(recorder, java.util.Set.of("integration-test"));
             var registry = new ProviderRegistry(() -> {});
-            var registration = registry.register("MagicSpells", "rebuilt", "magicspells-execution-1", probe);
+            var registration = registry.register("MagicSpells", "rebuilt", "magicspells-execution-2", probe);
             registry.start(new Diagnostics.Capture("shared", "now", System.nanoTime(), 5, 60));
             try (var scope = (AutoCloseable) recorderType.getMethod("enter", String.class, String.class, String.class)
                     .invoke(recorder, "spell", "integration-test", "execute")) {
@@ -41,7 +81,9 @@ class MagicSpellsJarTest {
             assertEquals("shared", measurements.get("captureId"));
             var row = (Map<?, ?>) ((List<?>) measurements.get("rows")).getFirst();
             assertEquals("integration-test", row.get("spell"));
-            assertEquals(Map.of("MATCH_CALLS", 1L), row.get("counters"));
+            assertEquals(Map.of("MATCH_CALLS", 1L, "INVENTORY_SLOTS", 0L), row.get("counters"));
+            assertEquals(true, measurements.get("totalsComplete"));
+            assertEquals(1L, ((Map<?, ?>) measurements.get("totals")).get("calls"));
         }
     }
 }
