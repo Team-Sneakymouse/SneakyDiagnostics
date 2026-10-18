@@ -110,3 +110,42 @@ For the rebuilt SneakyConfigurableVoice JAR, use the corresponding check:
 
 It exercises the actual voice recorder/provider through the same service and checks the
 detached report against the consumer's limits, including partial results on unregister.
+
+## MagicSpells scheduler capture
+
+`magicspells-execution-3` uses the existing protocol and optional adapter. Case-folded
+`spellKey` uses `Locale.ROOT`; `spell` retains configured internal spelling. Its
+`taskLifecycle` report reserves export space ahead of optional timing detail.
+
+- `start`/`end`: observed pending counts, async counts, in-flight callbacks, unknown
+  metadata/attribution, omitted task counts, observation offsets and the largest 512
+  pending groups. Group rows contain spell/source/kind/delay/period, pending count,
+  oldest/youngest ages and creation offsets. Negative creation offsets predate capture.
+- `totals`/`groups`: helper registrations, callback starts/completions/failures,
+  repeating executions, one-shot completions, cancellation requests, tracked removals
+  and cleanup terminations. Counts are independent of timing-scope counts and exclude
+  waiting time. Lifecycle groups retain the first 512 keys; omitted events are counted.
+- `unknownMetadataTasks` covers direct Bukkit/library work, registrations before
+  instrumentation and overflow. Historical owner/origin/kind/creation/period are unknown.
+  `nextRunTick` is null: the public scheduler exposes no reliable next-run timestamp.
+- `unobservedRemovals` means tracked metadata disappeared from the scheduler without
+  a supported terminal event. It is not an execution or cancellation count. Start-boundary
+  stale cleanup is separately `preCaptureUnobservedRemovals`.
+- `coverage` is `magicspells_sync_wrappers_only`; `allPluginLifecycleComplete` is false.
+  Direct work can live entirely between snapshots. `inventoryComplete` and
+  `lifecycleComplete` state the narrower coverage independently. Event collection stops
+  at the shared deadline; an end snapshot after it sets `endObservedAfterDeadline` and
+  marks lifecycle coverage incomplete. In-flight work and label/group/registry overflow
+  also require attention. An apparently old repeating task alone does not establish a leak.
+
+At most 65,536 entries retain bounded registration metadata outside capture. Completion
+and helper cancellation remove it immediately; reload/disable cancel scheduler work and
+clear it. External cancellation metadata remains bounded until boundary reconciliation
+or unload. Overflow counters are conservative since load/cleanup. No task payload,
+player identity, spell/Bukkit object or stack trace is retained. The public scheduler
+allocates a complete task list twice per capture; the adapter streams its relevant rows.
+
+The `verifyMagicSpells` command above also checks 36,000 pre-capture tasks and saturated
+timing detail through the actual consumer guard, including provider unregistration and
+metadata cleanup. It does not replace an isolated Paper behavior/overhead smoke test or
+an authorized production capture during representative pending-task growth.

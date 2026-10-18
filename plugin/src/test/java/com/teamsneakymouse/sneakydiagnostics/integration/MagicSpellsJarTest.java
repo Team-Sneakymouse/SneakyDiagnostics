@@ -12,6 +12,68 @@ import static org.junit.jupiter.api.Assertions.*;
 
 @EnabledIfSystemProperty(named = "magicSpellsJar", matches = ".+")
 class MagicSpellsJarTest {
+    @Test void rebuiltLifecycleInventorySurvivesTheRealConsumerGuardAndProviderUnregistration() throws Exception {
+        Path jar = Path.of(System.getProperty("magicSpellsJar"));
+        try (var loader = new URLClassLoader(new java.net.URL[]{jar.toUri().toURL()}, Diagnostics.class.getClassLoader())) {
+            var recorderType = loader.loadClass("com.nisovin.magicspells.util.performance.PerformanceRecorder");
+            var tasksType = loader.loadClass("com.nisovin.magicspells.util.performance.TaskLifecycle");
+            var pendingType = loader.loadClass(tasksType.getName() + "$Pending");
+            var probeType = loader.loadClass("com.nisovin.magicspells.util.performance.MagicSpellsProbe");
+            var recorder = recorderType.getConstructor().newInstance();
+            var tasks = tasksType.getConstructor().newInstance();
+            var schedule = tasksType.getMethod("schedule", String.class, String.class, long.class, long.class,
+                    Runnable.class, java.util.function.ToIntFunction.class);
+            var pendingConstructor = pendingType.getConstructor(int.class, boolean.class);
+            var pending = new java.util.ArrayList<Object>();
+            var callbacks = new java.util.ArrayList<Runnable>();
+            for (int i = 0; i < 36_000; i++) {
+                int id = i;
+                schedule.invoke(tasks, "Mixed-Spell", "origin-" + i % 600, 1000L, i == 0 ? -1L : 5L, (Runnable) () -> {},
+                        (java.util.function.ToIntFunction<Runnable>) body -> {
+                            if (id < 2) callbacks.add(body);
+                            return id;
+                        });
+                pending.add(pendingConstructor.newInstance(id, true));
+            }
+            var constructor = probeType.getDeclaredConstructor(recorderType, java.util.Set.class, tasksType, java.util.function.Supplier.class);
+            constructor.setAccessible(true);
+            var probe = (Diagnostics.Provider) constructor.newInstance(recorder, java.util.Set.of("Mixed-Spell"), tasks,
+                    (java.util.function.Supplier<Iterable<?>>) () -> pending);
+            var registry = new ProviderRegistry(() -> {});
+            var registration = registry.register("MagicSpells", "rebuilt", "magicspells-execution-3", probe);
+            registry.start(new Diagnostics.Capture("lifecycle", "now", System.nanoTime(), 0, 60));
+            callbacks.get(0).run();
+            callbacks.get(1).run();
+            callbacks.get(1).run();
+            tasksType.getMethod("cancel", int.class, Runnable.class).invoke(tasks, 2, (Runnable) () -> {});
+            pending.remove(2);
+            pending.removeFirst();
+            var enter = recorderType.getMethod("enter", String.class, String.class, String.class);
+            for (int i = 0; i < 30_000; i++) {
+                ((AutoCloseable) enter.invoke(recorder, "spell", "mixed-spell", "detail-" + i)).close();
+            }
+            registration.close();
+            var report = registry.stop("completed").getFirst();
+            assertFalse(report.containsKey("error"), () -> String.valueOf(report.get("error")));
+            assertEquals("provider_unregistered", report.get("reason"));
+            var measurements = (Map<?, ?>) report.get("measurements");
+            var lifecycle = (Map<?, ?>) measurements.get("taskLifecycle");
+            assertEquals(36_000L, ((Map<?, ?>) lifecycle.get("start")).get("pendingTasks"));
+            assertEquals(35_998L, ((Map<?, ?>) lifecycle.get("end")).get("pendingTasks"));
+            var counts = (Map<?, ?>) lifecycle.get("totals");
+            assertEquals(0L, counts.get("registrations"));
+            assertEquals(3L, counts.get("executions"));
+            assertEquals(2L, counts.get("repeatingExecutions"));
+            assertEquals(1L, counts.get("oneShotCompletions"));
+            assertEquals(1L, counts.get("trackedCancellations"));
+            assertEquals(true, measurements.get("spellTotalsComplete"));
+            assertEquals(0L, measurements.get("unknownOwnerScopes"));
+            assertEquals(30_000L, ((Map<?, ?>) measurements.get("totals")).get("calls"));
+            tasksType.getMethod("clear").invoke(tasks);
+            assertEquals(0, tasksType.getMethod("retainedTasks").invoke(tasks));
+        }
+    }
+
     @Test void saturatedDetailsKeepEveryAggregateAndFitTheRealConsumerReportLimit() throws Exception {
         Path jar = Path.of(System.getProperty("magicSpellsJar"));
         try (var loader = new URLClassLoader(new java.net.URL[]{jar.toUri().toURL()}, Diagnostics.class.getClassLoader())) {
