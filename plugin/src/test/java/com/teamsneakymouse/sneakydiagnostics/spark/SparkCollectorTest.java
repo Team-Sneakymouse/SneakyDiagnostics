@@ -34,6 +34,8 @@ class SparkCollectorTest {
         assertEquals(0, session.exports);
         assertEquals("completed", sink.report.get("reason"));
         assertEquals("dedicated_session", sink.report.get("coverage"));
+        assertEquals(true, sink.report.get("owned"));
+        assertTrue(sink.report.get("notes").toString().contains("previous profiler is cancelled"));
         assertArrayEquals(new byte[]{1, 2}, sink.finish());
         assertEquals(1, session.stops);
         assertEquals(1, session.exports);
@@ -41,21 +43,8 @@ class SparkCollectorTest {
         assertEquals(1, sink.writes);
     }
 
-    @Test void sharedCaptureExportsWithoutStoppingTheExistingProfiler() {
-        var session = new Recording(false);
-        var sink = new Sink();
-        var collector = new SparkCollector(id -> session, sink);
-        collector.start(context(), List.of());
-        collector.onTick(null);
-        sink.finish();
-        assertEquals(0, session.stops);
-        assertEquals(1, session.exports);
-        assertEquals(false, sink.report.get("owned"));
-        assertEquals("shared_history", sink.report.get("coverage"));
-    }
-
-    @Test void operatorReplacementEndsObservationAndMarksTheExportPartial() {
-        var session = new Recording(false);
+    @Test void operatorReplacementEndsCaptureAndMarksTheExportPartial() {
+        var session = new Recording(true);
         var sink = new Sink();
         var collector = new SparkCollector(id -> session, sink);
         collector.start(context(), List.of());
@@ -105,9 +94,9 @@ class SparkCollectorTest {
         @Override public boolean owned() { return owned; }
         @Override public boolean current() { return current; }
         @Override public Map<String, Object> details() { return Map.of("engine", "test"); }
-        @Override public void stop() { stops++; }
+        @Override public void stop() { if (current) stops++; }
         @Override public byte[] export() {
-            if (owned) assertEquals(1, stops);
+            if (owned && current) assertEquals(1, stops);
             exports++;
             if (failExport) throw new IllegalStateException("disk/export failure");
             return new byte[]{1, 2};

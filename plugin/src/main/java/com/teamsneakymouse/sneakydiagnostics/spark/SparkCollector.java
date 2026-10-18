@@ -11,7 +11,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 
-/** Owns only sessions it started; shared samplers are exported without stopping them. */
+/** Captures a dedicated spark session synchronized with the diagnostics capture. */
 public final class SparkCollector implements DiagnosticCollector, Listener {
     private final SparkProfiler profiler;
     private final ReportSink reports;
@@ -28,7 +28,7 @@ public final class SparkCollector implements DiagnosticCollector, Listener {
     @Override public boolean active() { return context != null; }
     @Override public boolean busy() { return active() || reports.busy(name()); }
     @Override public String status() {
-        return active() ? (session.owned() ? "Collecting " : "Observing shared profiler for ") + context.id()
+        return active() ? "Collecting " + context.id()
                 : reports.busy(name()) ? "Exporting profile" : outcome;
     }
 
@@ -68,8 +68,8 @@ public final class SparkCollector implements DiagnosticCollector, Listener {
         report.put("owned", captured.owned());
         report.put("coverage", captured.owned() ? "dedicated_session" : "shared_history");
         report.put("complete", reason.equals("completed"));
-        report.put("notes", "Shared profiles can include samples before this capture and omit the newest buffered samples. "
-                + "Existing profiler settings are preserved. World filters do not restrict profiling. "
+        report.put("notes", "A dedicated profiler is started for this capture; any previous profiler is cancelled. "
+                + "World filters do not restrict profiling. "
                 + "Profile export runs off the server thread; inspect spark's own windows for actual sample coverage.");
         outcome = "Finished " + finished.id() + " (" + reason + ")";
         reports.write(name(), finished, 1, () -> report, "profile.sparkprofile", () -> {

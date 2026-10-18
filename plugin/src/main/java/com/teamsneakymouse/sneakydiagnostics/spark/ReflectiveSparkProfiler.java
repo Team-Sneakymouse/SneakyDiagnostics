@@ -85,7 +85,6 @@ public final class ReflectiveSparkProfiler implements SparkProfiler {
 
         Session open(String captureId) throws Exception {
             Object sampler = invoke(active, container);
-            boolean owned = sampler == null;
             Object props = propsType.getConstructor().newInstance();
             invoke(propsType.getMethod("comment", String.class), props, "SneakyDiagnostics capture " + captureId);
             invoke(propsType.getMethod("mergeStrategy", mergeType), props, mergeType.getField("SAME_METHOD").get(null));
@@ -94,36 +93,26 @@ public final class ReflectiveSparkProfiler implements SparkProfiler {
                 catch (Exception e) { throw new IllegalStateException(e); }
             };
             invoke(propsType.getMethod("classSourceLookup", Supplier.class), props, sources);
-            if (owned) {
-                Object builder = builderType.getConstructor().newInstance();
-                invoke(builderType.getMethod("samplingInterval", double.class), builder, 4d);
-                Object plugin = call(platform, "getPlugin");
-                Object dumper = call(plugin, "getDefaultThreadDumper");
-                invoke(builderType.getMethod("threadDumper", dumperType), builder, dumper);
-                sampler = invoke(builderType.getMethod("start", platformType), builder, platform);
-                try { invoke(set, container, sampler); }
-                catch (Exception | LinkageError e) {
-                    // A concurrent start won the container; stop only the sampler we just created.
-                    try { invoke(stop, sampler, true); }
-                    catch (Exception | LinkageError cleanup) { e.addSuppressed(cleanup); }
-                    throw e;
-                }
-            } else {
-                if (!call(sampler, "getMode").toString().equals("EXECUTION")) {
-                    throw new IllegalStateException("Existing spark profiler is not an execution profile; left untouched");
-                }
-                Object aggregator = field(sampler, "dataAggregator");
-                if (aggregator.getClass().getSimpleName().startsWith("Ticked")) {
-                    throw new IllegalStateException("Existing spark profiler filters slow ticks; left untouched");
-                }
-                Object dumper = field(sampler, "threadDumper");
-                Thread thread = Thread.currentThread();
-                if (!Boolean.TRUE.equals(invoke(dumperType.getMethod("isThreadIncluded", long.class, String.class),
-                        dumper, thread.threadId(), thread.getName()))) {
-                    throw new IllegalStateException("Existing spark profiler excludes the server thread; left untouched");
-                }
+            Object builder = builderType.getConstructor().newInstance();
+            invoke(builderType.getMethod("samplingInterval", double.class), builder, 4d);
+            Object plugin = call(platform, "getPlugin");
+            Object dumper = call(plugin, "getDefaultThreadDumper");
+            invoke(builderType.getMethod("threadDumper", dumperType), builder, dumper);
+            if (sampler != null) {
+                // Discard the old capture before starting ours so retained history cannot leak in.
+                // Release its identity first, matching spark's cancellation order.
+                invoke(unset, container, sampler);
+                invoke(stop, sampler, true);
             }
-            return new Recording(this, sampler, props, owned);
+            sampler = invoke(builderType.getMethod("start", platformType), builder, platform);
+            try { invoke(set, container, sampler); }
+            catch (Exception | LinkageError e) {
+                // A concurrent start won the container; stop only the sampler we just created.
+                try { invoke(stop, sampler, true); }
+                catch (Exception | LinkageError cleanup) { e.addSuppressed(cleanup); }
+                throw e;
+            }
+            return new Recording(this, sampler, props, true);
         }
     }
 

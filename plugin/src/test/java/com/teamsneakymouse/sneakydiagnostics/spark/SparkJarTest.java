@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class SparkJarTest {
     @TempDir Path directory;
 
-    @Test void bundledSparkCanBeReusedAndExportedWithoutStoppingIt() throws Exception {
+    @Test void bundledSparkIsCancelledBeforeDedicatedCaptureAndExport() throws Exception {
         String jar = System.getProperty("sparkJar");
         assumeTrue(jar != null, "Run :plugin:verifySpark -PsparkJar=...");
         try (var loader = new URLClassLoader(new java.net.URL[]{Path.of(jar).toUri().toURL()}, getClass().getClassLoader())) {
@@ -49,10 +49,11 @@ class SparkJarTest {
             var grouper = (Supplier<?>) grouperType.getField("BY_NAME").get(null);
             Class<?> settingsType = loader.loadClass(root + ".sampler.SamplerSettings");
             Object settings = settingsType.getConstructor(int.class, dumperType, grouperType, long.class, boolean.class, boolean.class)
-                    .newInstance(4000, dumper, grouper.get(), -1L, false, false);
-            // An initialized JavaSampler has genuine aggregator/settings/export behavior, but needs no server.
+                    .newInstance(4000, dumper, grouper.get(), -1L, true, false);
+            // Run a genuine background sampler to exercise cancellation of its task and executor.
             Object sampler = loader.loadClass(root + ".sampler.java.JavaSampler")
                     .getConstructor(platformType, settingsType).newInstance(platform, settings);
+            sampler.getClass().getMethod("start").invoke(sampler);
             access.set.invoke(access.container, sampler);
             Object api = loader.loadClass(root + ".api.SparkApi").getConstructor(platformType).newInstance(platform);
             Class<?> service = loader.loadClass("me.lucko.spark.api.Spark");
@@ -68,20 +69,29 @@ class SparkJarTest {
                         return services;
                     });
             var session = new ReflectiveSparkProfiler(server).open("proof");
-            assertFalse(session.owned());
-            assertTrue(session.current());
-            session.stop();
-            assertSame(sampler, access.active.invoke(access.container));
+            try {
+                assertTrue(session.owned());
+                assertTrue(session.current());
+                assertNotSame(sampler, access.active.invoke(access.container));
+                assertTrue(((java.util.concurrent.Future<?>) ReflectiveSparkProfiler.field(sampler, "task")).isCancelled());
+                assertTrue(((java.util.concurrent.ExecutorService) ReflectiveSparkProfiler.field(sampler, "workerPool")).isShutdown());
+                assertEquals(false, session.details().get("background"));
+            } finally {
+                session.stop();
+                // Clean up even when this regression test encounters the old reuse behavior.
+                if (access.active.invoke(access.container) == sampler) {
+                    access.unset.invoke(access.container, sampler);
+                    access.stop.invoke(sampler, true);
+                }
+            }
+            assertNull(access.active.invoke(access.container));
             byte[] bytes = session.export();
             assertTrue(bytes.length > 0);
             Object proto = access.export.getReturnType().getMethod("parseFrom", byte[].class).invoke(null, (Object) bytes);
             Object metadata = proto.getClass().getMethod("getMetadata").invoke(proto);
             assertEquals("SneakyDiagnostics capture proof", metadata.getClass().getMethod("getComment").invoke(metadata));
-            assertSame(sampler, access.active.invoke(access.container));
+            assertNull(access.active.invoke(access.container));
             Files.write(directory.resolve("proof.sparkprofile"), bytes);
-            // The sampler was never started; dispose its executor without calling stop() on an idle native job.
-            ((java.util.concurrent.ExecutorService) ReflectiveSparkProfiler.field(sampler, "workerPool")).shutdownNow();
-            access.unset.invoke(access.container, sampler);
             var owned = new ReflectiveSparkProfiler(() -> platform).open("owned-proof");
             try {
                 assertTrue(owned.owned());
@@ -106,13 +116,16 @@ class SparkJarTest {
                     .newInstance(4000, excludedDumper, grouper.get(), -1L, false, false);
             Object excluded = loader.loadClass(root + ".sampler.java.JavaSampler")
                     .getConstructor(platformType, settingsType).newInstance(platform, excludedSettings);
+            excluded.getClass().getMethod("start").invoke(excluded);
             access.set.invoke(access.container, excluded);
+            var fresh = new ReflectiveSparkProfiler(() -> platform).open("excluded");
             try {
-                var error = assertThrows(IllegalStateException.class, () -> new ReflectiveSparkProfiler(() -> platform).open("excluded"));
-                assertTrue(error.getMessage().contains("excludes the server thread"));
-                assertSame(excluded, access.active.invoke(access.container));
+                assertTrue(fresh.owned());
+                assertTrue(fresh.current());
+                assertNotSame(excluded, access.active.invoke(access.container));
+                assertTrue(((java.util.concurrent.Future<?>) ReflectiveSparkProfiler.field(excluded, "task")).isCancelled());
             } finally {
-                ((java.util.concurrent.ExecutorService) ReflectiveSparkProfiler.field(excluded, "workerPool")).shutdownNow();
+                fresh.stop();
             }
         }
     }
