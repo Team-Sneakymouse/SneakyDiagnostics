@@ -6,6 +6,8 @@ import com.teamsneakymouse.sneakydiagnostics.capture.CaptureCoordinator;
 import com.teamsneakymouse.sneakydiagnostics.capture.DiagnosticCollector;
 import com.teamsneakymouse.sneakydiagnostics.capture.ReportWriter;
 import com.teamsneakymouse.sneakydiagnostics.entity.EntityCensusCollector;
+import com.teamsneakymouse.sneakydiagnostics.connection.ConnectionCollector;
+import com.teamsneakymouse.sneakydiagnostics.connection.ConnectionArguments;
 import com.teamsneakymouse.sneakydiagnostics.scheduler.SchedulerCollector;
 import com.teamsneakymouse.sneakydiagnostics.timeline.TimelineCollector;
 import com.teamsneakymouse.sneakydiagnostics.api.Diagnostics;
@@ -38,20 +40,22 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
         reports = new ReportWriter(this);
         entities = new EntityCensusCollector(this, reports);
         var timeline = new TimelineCollector(reports);
+        var connections = new ConnectionCollector(reports);
         var scheduler = new SchedulerCollector(this, reports);
         providers = new ProviderRegistry(() -> {
             if (!Bukkit.isPrimaryThread()) throw new IllegalStateException("Diagnostics lifecycle must run on the server thread");
         });
         var plugins = new PluginCollector(providers, reports);
         var spark = new SparkCollector(new ReflectiveSparkProfiler(getServer()), reports);
-        for (var collector : List.of(entities, timeline, scheduler, plugins, spark)) collectors.put(collector.name(), collector);
+        for (var collector : List.of(entities, timeline, scheduler, plugins, spark, connections)) collectors.put(collector.name(), collector);
         coordinator = new CaptureCoordinator(List.copyOf(collectors.values()));
         getServer().getPluginManager().registerEvents(timeline, this);
+        getServer().getPluginManager().registerEvents(connections, this);
         getServer().getPluginManager().registerEvents(scheduler, this);
         getServer().getPluginManager().registerEvents(plugins, this);
         getServer().getPluginManager().registerEvents(spark, this);
         getServer().getServicesManager().register(Diagnostics.class, providers, this, ServicePriority.Normal);
-        getLogger().info("Ready; /diagnostics <entities|timeline|scheduler|plugins|spark|all> <start|status|stop>. Collection is manual.");
+        getLogger().info("Ready; /diagnostics <entities|timeline|scheduler|plugins|spark|connections|all> <start|status|stop>. Collection is manual.");
     }
 
     @Override public void onDisable() {
@@ -74,6 +78,18 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
         try {
             switch (action) {
                 case "start" -> {
+                    if (name.equals("connections")) {
+                        var parsed = ConnectionArguments.start(options, playerName -> {
+                            var player = Bukkit.getPlayerExact(playerName);
+                            return player == null ? null : player.getUniqueId();
+                        });
+                        var context = CaptureContext.create(parsed.seconds());
+                        coordinator.start(selected, false, collector -> ((ConnectionCollector) collector)
+                                .start(context, List.of(), parsed.targets()));
+                        sender.sendMessage("Started connections: " + context.id() + ", " + parsed.seconds()
+                                + " seconds; " + parsed.targets().size() + " targets numbered in supplied order. Everyone else remains the comparison baseline.");
+                        break;
+                    }
                     var parsed = CaptureArguments.start(name, options);
                     List<World> worlds = Bukkit.getWorlds();
                     if (parsed.world() != null) {
@@ -121,13 +137,13 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
     }
 
     private static void help(CommandSender sender, String label) {
-        sender.sendMessage("/" + label + " <entities|timeline|scheduler|plugins|spark|all> <start|status|stop>; entities also supports resume.");
+        sender.sendMessage("/" + label + " <entities|timeline|scheduler|plugins|spark|connections|all> <start|status|stop>; entities also supports resume.");
     }
 
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         boolean legacy = command.getName().equalsIgnoreCase("entitycensus");
         if (!legacy && args.length == 1) {
-            return List.of("entities", "timeline", "scheduler", "plugins", "spark", "all").stream()
+            return List.of("entities", "timeline", "scheduler", "plugins", "spark", "connections", "all").stream()
                     .filter(name -> allowed(sender, name, false) && name.startsWith(args[0].toLowerCase(Locale.ROOT))).toList();
         }
         String name = legacy ? "entities" : args.length > 0 ? args[0].toLowerCase(Locale.ROOT) : "";
@@ -138,6 +154,11 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
             return actions.stream().filter(action -> action.startsWith(args[actionIndex].toLowerCase(Locale.ROOT))).toList();
         }
         if (args.length > actionIndex + 1 && args[actionIndex].equalsIgnoreCase("start")) {
+            if (name.equals("connections")) {
+                String prefix = args[args.length - 1].toLowerCase(Locale.ROOT);
+                return Bukkit.getOnlinePlayers().stream().map(org.bukkit.entity.Player::getName)
+                        .filter(player -> player.toLowerCase(Locale.ROOT).startsWith(prefix)).toList();
+            }
             if (name.equals("entities") && args.length == actionIndex + 2
                     || name.equals("all") && args.length == actionIndex + 3) {
                 String prefix = args[args.length - 1];

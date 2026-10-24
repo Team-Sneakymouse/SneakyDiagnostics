@@ -6,7 +6,9 @@ plugins {
 dependencies {
     implementation(project(":api"))
     compileOnly("io.papermc.paper:paper-api:26.2.build.116-stable")
+    compileOnly("com.velocitypowered:velocity-api:3.4.0-SNAPSHOT")
     testImplementation("io.papermc.paper:paper-api:26.2.build.116-stable")
+    testImplementation("com.velocitypowered:velocity-api:3.4.0-SNAPSHOT")
 }
 
 // The service and its providers must resolve the exact same API classes at runtime.
@@ -42,7 +44,7 @@ tasks.register<Test>("verifyVoice") {
 
 tasks.processResources {
     inputs.property("version", project.version.toString())
-    filesMatching("plugin.yml") { expand("version" to project.version.toString()) }
+    filesMatching(listOf("plugin.yml", "velocity-plugin.json")) { expand("version" to project.version.toString()) }
 }
 
 // Opt-in contract/export proof against a real bundled spark JAR, without starting Minecraft.

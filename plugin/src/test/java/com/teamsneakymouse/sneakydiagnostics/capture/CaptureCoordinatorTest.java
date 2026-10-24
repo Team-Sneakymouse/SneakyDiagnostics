@@ -64,6 +64,20 @@ class CaptureCoordinatorTest {
         assertTrue(second.active());
     }
 
+    @Test void customStartOptionsStillValidateBeforeStartingAndRollbackOnFailure() {
+        var collector = new FakeCollector();
+        var coordinator = new CaptureCoordinator(List.of(collector));
+        collector.writing = true;
+        assertThrows(IllegalArgumentException.class, () -> coordinator.start(List.of(collector), false, ignored -> fail("Busy collector must reject before start callback")));
+        collector.writing = false;
+        assertThrows(IllegalStateException.class, () -> coordinator.start(List.of(collector), false, selected -> {
+            selected.start(context, List.of());
+            throw new IllegalStateException("Custom start failed after acquiring resources");
+        }));
+        assertFalse(collector.active());
+        assertEquals("start_error", collector.stopReason);
+    }
+
     private static final class FakeCollector implements DiagnosticCollector {
         CaptureContext context;
         boolean active, writing, fail;

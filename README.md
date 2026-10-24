@@ -1,6 +1,6 @@
 # SneakyDiagnostics
 
-Paper 26.2+ diagnostics plugin for investigating TPS issues in custom plugins and scripts. Java 25 is required. Collection is manual. Available collectors cover entities, the tick timeline, public scheduler state, registered plugin probes, optional spark profiles, and optional Ignite scheduler instrumentation.
+Paper 26.2+ and Velocity 3.4 diagnostics plugin for investigating server performance and connection issues. Java 25 is required. Collection is manual. Paper collectors cover connections, entities, the tick timeline, public scheduler state, registered plugin probes, optional spark profiles, and optional Ignite scheduler instrumentation. Velocity supports connection captures.
 
 ## Build and install
 
@@ -9,6 +9,8 @@ Paper 26.2+ diagnostics plugin for investigating TPS issues in custom plugins an
 ```
 
 Copy `plugin/build/libs/SneakyDiagnostics-<version>.jar` (not the sources JAR) to the server's `plugins/` folder and restart the server. The plugin works independently of Ignite. This project does not deploy itself or change production configuration.
+
+The same JAR also installs in Velocity's `plugins/` folder. It contains independent Paper and Velocity entry points and shared connection-reporting code; no separate proxy companion is needed. Install it in both processes to compare their observations. Velocity does not load the Paper collectors or require Ignite. Both processes must support Java 25.
 
 For scheduler execution and cancellation attribution, copy `ignite/build/libs/SneakyDiagnostics-Ignite-<version>.jar` to Ignite's `mods/` directory and restart. Keep only one companion version installed. Scheduler captures automatically include its measurements when available; status reports availability. The tested baseline is Paper 26.2 build 116 with Ignite 1.2.1. Later releases are accepted when the required hook contracts remain compatible, without an exact build-number gate. See the [companion documentation](ignite/README.md) for compatibility and runtime checks.
 
@@ -36,6 +38,7 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 /diagnostics scheduler start 60
 /diagnostics plugins start 60
 /diagnostics spark start 120
+/diagnostics connections start 120
 /diagnostics all start 60 world
 /diagnostics all status
 /diagnostics all stop
@@ -50,9 +53,10 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 | `/diagnostics scheduler` | `start [seconds]` | `sneakydiagnostics.scheduler` |
 | `/diagnostics plugins` | `start [seconds]` | `sneakydiagnostics.plugins` |
 | `/diagnostics spark` | `start [seconds]` | `sneakydiagnostics.spark` |
+| `/diagnostics connections` | `start [seconds] [player ...]` | `sneakydiagnostics.connections` |
 | `/diagnostics all` | `start [seconds] [world]` | `sneakydiagnostics.all` |
 
-All permissions default to operators. `sneakydiagnostics.all` includes the five individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
+All Paper permissions default to operators. `sneakydiagnostics.all` includes the six individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
 
 `all start` validates every collector before starting, and shares a capture ID, timestamp, and monotonic clock across all reports. It rejects busy collectors, including pending report writes, and rolls back partial starts. Individual captures can overlap independently; starting or resuming another capture is blocked while a coordinated capture is still active. `all stop` stops all active collectors, including independently started ones. A census may finish before the requested time if it reaches the end of its traversal; timeline and scheduler collection continue for their full window.
 
@@ -113,6 +117,40 @@ Label lists are capped at 64 entries and each label at 128 characters, with trun
 Tracking subscriptions are not measurements of tracker CPU time, update frequency, or rejected visibility checks. This plugin identifies candidate groups for a subsequent targeted NMS probe if necessary.
 
 Paper API reference: [entity tracking](https://jd.papermc.io/paper/26.2/org/bukkit/entity/Entity.html#getTrackedBy()).
+
+## Connection captures on Paper and Velocity
+
+During a slowdown, run these in the respective consoles, as close together as practical:
+
+```text
+# Paper
+diagnostics connections start 120
+# Velocity
+vdiagnostics connections start 120
+```
+
+Both accept `status` and `stop`, default to 60 seconds, and allow 1–1800 seconds. Paper's `all start` also includes connections, with the normal shared capture ID. A connections-only Paper capture includes its own tick timeline; no spark profile or entity scan is necessary. Velocity uses `/vdiagnostics` to avoid intercepting Paper's `/diagnostics`. Its console can always use the command; players require `sneakydiagnostics.connections` granted in the proxy permission system. Paper permissions do not grant proxy permissions.
+
+When only a few players are affected, name them after the duration:
+
+```text
+diagnostics connections start 120 Alice Bob
+vdiagnostics connections start 120 Alice Bob
+```
+
+Targets are numbered in the supplied order (`Alice` is target 1, `Bob` target 2 in this example), while names and UUIDs stay out of reports. Use the same ordered list in both processes if you want the target markers to refer to the same players. Exact online player names are required; unknown/offline players, duplicates, and selections over 16 players reject the entire start. The duration can be omitted (`connections start Alice Bob` uses 60 seconds). Selection applies only to that capture. A later start without names, including `all start`, has no targets.
+
+Everyone still receives the same lightweight ping sampling. Selected players are read first within the existing per-sample limit, and their identity slots are reserved against player churn. Per-player rows contain `target`: 0 for comparison players and 1–16 for selected players. Each sample adds separate `targets` and `baseline` summaries (sampled count, unknown pings, percentiles, and high-ping thresholds); the original population summary remains available. Comparison players are not assumed to be unaffected. Missing target rows mean unobserved players, not zero latency: they may have disconnected, failed a read, or hit the overall row cap. Target selection follows the UUID in memory across reconnects during the capture. The report's target list contains only numeric markers and capture-local player numbers. Targeting adds selection, priority and comparison summaries; it does not enable deeper packet instrumentation.
+
+Each process writes a local `reports/<capture-id>/connections-1.json` under its plugin data directory and logs the absolute path. Reports include UTC start/end times, platform/build versions, actual monotonic sample offsets, population counts, per-player ping estimates, nearest-rank p50/p95/max, and counts at or above 250/500/1000/2000 ms. Velocity rows also include the registered backend name when available. Paper includes one-second tick-duration windows. Capture IDs and anonymous player numbers are independent across processes: compare UTC times and population trends; do not join player numbers or subtract ping values to calculate backend latency. Proxy capture IDs use UUIDv4 and are not chronologically sortable.
+
+The recorder samples public API cached ping values at most once per second. Paper calls `Player.getPing()` on the server thread; Velocity calls its public `Player.getPing()` from a scheduled task. These are application-level estimates, not fresh probes or pure network RTT. Identical successive values do not demonstrate that a keepalive reply arrived during each second. Velocity's `-1` ping remains unknown and is excluded from percentiles/threshold counts; empty populations have no percentile. Neither API reading is an isolated measurement of the proxy-to-Paper link. See the [Paper ping contract](https://jd.papermc.io/paper/26.2/org/bukkit/entity/Player.html#getPing()) and [Velocity ping contract](https://jd.papermc.io/velocity/3.4.0/com/velocitypowered/api/proxy/Player.html#getPing()).
+
+Sample gaps expose delayed observation; missed seconds are never backfilled. Paper tick stalls delay sampling and capture completion. Proxy scheduling can also be delayed. No new sample begins at or after the requested wall-clock deadline; individual API reads cannot be preempted. No final late snapshot is fabricated. These are incremental observations, not simultaneous snapshots; proxy membership may change during a sample. Collection overhead is reported; serialization runs on a separate writer thread. Manual stops and shutdown produce partial reports. Abrupt process termination can interrupt writing. No automatic capture, upload, report deletion, active ping traffic, or packet interception is added.
+
+Reads are bounded to 512 players per sample, 4,096 distinct player identities per capture, and 250,000 retained player rows. After a cap is reached, omitted player counts and `truncated` expose incomplete coverage; retained players may be a biased subset. Backend labels are capped at 128 characters. Read errors are counted without exporting exception text. Unknown ping values, read errors, truncation, early stops, or no samples mark the report incomplete. Player UUIDs are used only in memory to assign capture-local numbers; names, UUIDs, IP addresses and packet contents are omitted from reports.
+
+These reports establish whether latency rises for one player or across the population, and whether it coincides with observed tick delays. They cannot establish packet loss, bandwidth saturation, retransmissions, event-loop queueing, a bad route, or the responsible provider. For a same-host proxy/backend setup, a follow-up investigation should correlate the capture times with host network/TCP counters and measurements from affected clients. Healthy tick durations alone do not prove that proxy processing or networking is healthy.
 
 ## Tick timeline
 

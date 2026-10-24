@@ -1,0 +1,9 @@
+{
+  "id": "sneakydiagnostics",
+  "name": "SneakyDiagnostics",
+  "version": "${version}",
+  "description": "On-demand connection diagnostics",
+  "authors": ["Team Sneakymouse"],
+  "url": "https://github.com/Team-Sneakymouse/SneakyDiagnostics",
+  "main": "com.teamsneakymouse.sneakydiagnostics.velocity.SneakyDiagnosticsVelocity"
+}

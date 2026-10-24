@@ -55,7 +55,7 @@ subprojects {
                     name.set(artifactName)
                     description.set(when (project.name) {
                         "api" -> "Provider interface for optional SneakyDiagnostics integrations"
-                        "plugin" -> "On-demand Paper server diagnostics for investigating TPS issues"
+                        "plugin" -> "On-demand Paper and Velocity diagnostics for server performance and connections"
                         else -> "Optional Ignite instrumentation companion for SneakyDiagnostics"
                     })
                     url.set("https://github.com/Team-Sneakymouse/SneakyDiagnostics")

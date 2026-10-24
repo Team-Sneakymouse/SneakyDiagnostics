@@ -2,6 +2,7 @@ package com.teamsneakymouse.sneakydiagnostics.capture;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 import org.bukkit.World;
 
 /** Validates a whole start before mutating collectors and rolls back partial starts. */
@@ -19,11 +20,16 @@ public final class CaptureCoordinator {
     }
 
     public void start(List<DiagnosticCollector> selected, CaptureContext context, List<World> worlds, boolean all) {
+        start(selected, all, collector -> collector.start(context, worlds));
+    }
+
+    /** Keeps validation and rollback shared when a collector has additional start options. */
+    public void start(List<DiagnosticCollector> selected, boolean all, Consumer<DiagnosticCollector> startCollector) {
         if (coordinatedRunning()) throw new IllegalArgumentException("A coordinated capture is still running; stop it before starting another capture");
         if (selected.stream().anyMatch(DiagnosticCollector::busy)) throw new IllegalArgumentException("A selected collector is collecting or writing a report");
         List<DiagnosticCollector> started = new ArrayList<>();
         try {
-            for (var collector : selected) { started.add(collector); collector.start(context, worlds); }
+            for (var collector : selected) { started.add(collector); startCollector.accept(collector); }
         } catch (RuntimeException e) {
             for (var collector : started) {
                 try { collector.stop("start_error"); }
