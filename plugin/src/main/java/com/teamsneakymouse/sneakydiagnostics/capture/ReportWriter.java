@@ -7,6 +7,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,7 +56,7 @@ public final class ReportWriter implements ReportSink, AutoCloseable {
                                 String artifactName, Supplier<byte[]> artifact) {
         if (!pending.add(collector)) throw new IllegalStateException("Report already pending: " + collector);
         Path path = plugin.getDataFolder().toPath().resolve("reports").resolve(context.id())
-                .resolve(collector + "-" + segment + ".json");
+                .resolve(ReportSink.fileName(collector, null, segment));
         worker.execute(() -> {
             try {
                 var report = detachedReport.get();
@@ -83,16 +84,42 @@ public final class ReportWriter implements ReportSink, AutoCloseable {
                         plugin.getLogger().log(Level.WARNING, "Cannot save " + artifactPath, e);
                     }
                 }
-                try (var out = Files.newBufferedWriter(path, StandardOpenOption.CREATE_NEW)) {
-                    new GsonBuilder().setPrettyPrinting().create().toJson(report, out);
-                }
-                plugin.getLogger().info("Saved " + path.toAbsolutePath());
+                save(path, report);
             } catch (IOException | RuntimeException e) {
                 plugin.getLogger().log(Level.SEVERE, "Cannot save " + path, e);
             } finally {
                 pending.remove(collector);
             }
         });
+    }
+
+    @Override public void write(String collector, CaptureContext context, int segment, List<ReportFile> files) {
+        if (!pending.add(collector)) throw new IllegalStateException("Report already pending: " + collector);
+        Path dir = plugin.getDataFolder().toPath().resolve("reports").resolve(context.id());
+        worker.execute(() -> {
+            try {
+                Files.createDirectories(dir);
+                for (ReportFile file : files) {
+                    Path path = dir.resolve(ReportSink.fileName(collector, file.suffix(), segment));
+                    try {
+                        save(path, file.report().get());
+                    } catch (IOException | RuntimeException e) {
+                        plugin.getLogger().log(Level.SEVERE, "Cannot save " + path, e);
+                    }
+                }
+            } catch (IOException | RuntimeException e) {
+                plugin.getLogger().log(Level.SEVERE, "Cannot save reports in " + dir, e);
+            } finally {
+                pending.remove(collector);
+            }
+        });
+    }
+
+    private void save(Path path, Map<String, Object> report) throws IOException {
+        try (var out = Files.newBufferedWriter(path, StandardOpenOption.CREATE_NEW)) {
+            new GsonBuilder().setPrettyPrinting().create().toJson(report, out);
+        }
+        plugin.getLogger().info("Saved " + path.toAbsolutePath());
     }
 
     @Override public void close() { worker.shutdown(); }
