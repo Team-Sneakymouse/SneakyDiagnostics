@@ -48,7 +48,7 @@ Standard header plus:
   "providers": [
     { "plugin": "SneakyWizards", "pluginVersion": "...", "instrumentationVersion": "...",
       "started": true, "reason": "completed", "complete": true,
-      "file": "plugins-sneakywizards-1.json", "uncompressedBytes": 12345, "error": null }
+      "file": "plugins-sneakywizards-1.json", "error": null }
   ],
   "incompleteProviders": ["MagicSpells"],
   "complete": true,
@@ -60,6 +60,9 @@ Standard header plus:
 - Collector `complete` means the coordination was normal: reason `completed` and no provider
   failed to start or stop. An incomplete provider is listed in `incompleteProviders` and does
   not by itself make the collector incomplete.
+- `error` is omitted when null, and a provider that failed has no `measurements`; readers treat a missing
+  `error` as null and a missing `measurements` as unavailable, never as zero cost. Index entries carry no
+  sizes; the manifest has them.
 - No registered providers means no plugin measurements, not zero plugin cost (keep this note).
 
 ## `plugins-<provider>-1.json`
@@ -90,19 +93,21 @@ shared probe emit this shape:
   `selfNanos` excludes time in nested sections and sums correctly across a nesting tree; it is
   exact only for strictly nested sections, and `nestingErrors` counts mismatched ends.
 - **Percentiles:** `histogramLog2[k]` counts calls with `floor(log2(nanos)) == k` (k from 0 to 40;
-  longer calls land in the last bucket). `p50/p95/p99Nanos` are the upper bound of the bucket
+  calls of 0 or 1 ns land in bucket 0, longer ones in the last bucket). `p50/p95/p99Nanos` are the upper bound of the bucket
   containing that rank, so they overestimate by less than 2x.
-- **When:** `maxAtMillis` and `atMillis` are capture offsets (the shared monotonic origin);
+- **When:** `maxAtMillis` and `atMillis` are capture offsets (the shared monotonic origin) of the call's
+  **end**, like the series;
   `atTick` is the server tick number. `slowest` holds the 10 longest calls across all sections.
 - **Series:** windows are `[i*windowMillis, (i+1)*windowMillis)` of capture offset, aligned with the
   timeline report's one-second windows. Only the 16 sections with the largest `totalNanos` are
-  included; `calls[i]` and `nanos[i]` are for window `i`. Windows with no calls are `0`.
+  included; `calls[i]` and `nanos[i]` are for window `i` (a call belongs to the window in which it ends;
+  `nanos` is inclusive wall time, like `totalNanos`). Windows with no calls are `0`.
 - **Bounds:** at most 256 distinct names per map; extra names add to `omittedKeys` and make the
   provider incomplete. Labels are fixed strings (kinds, spells, machine types), never player
   names, ids or text. Values must satisfy the existing 250,000-value / 16-level report limit.
 - **Entity ownership (standard levels):** providers that own entities report `entities.owned`
   (total) and `entities.owned.<bukkit entity type, lowercase>` as levels. Per-type counts only:
-  no per-chunk or per-entity data.
+  no per-chunk or per-entity data. The entity census reports types in upper case; fold case to join them.
 - When no capture is running a probe does no work: no timing, no allocation, no string building.
 
 ## `manifest.json`
@@ -145,3 +150,8 @@ shared probe emit this shape:
 - v1 `Diagnostics.Provider` registrations keep working unchanged through an adapter and are written
   to a per-provider file with their measurements as provided.
 - Existing captures (v1 `plugins-1.json` with embedded providers) stay readable by the analysis tools.
+- `complete` changed meaning: in v1 the collector's `complete` was false when any provider was incomplete;
+  in v2 it only describes coordination, and coverage is per provider (`incompleteProviders`).
+- In the manifest, the index and provider files all have `collector: "plugins"` (tell them apart by name:
+  `plugins-1.json` is the index), and `spark-1.json` and `profile.sparkprofile` are listed with
+  `collector: "spark"`.
