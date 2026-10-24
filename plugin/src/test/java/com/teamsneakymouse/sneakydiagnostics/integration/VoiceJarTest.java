@@ -28,7 +28,7 @@ class VoiceJarTest {
             assertSame(Diagnostics.class, loader.loadClass(Diagnostics.class.getName()));
             var recorder = recorderType.getConstructor().newInstance();
             var provider = (Diagnostics.Provider) probeType.getConstructor(recorderType).newInstance(recorder);
-            var registry = new ProviderRegistry(() -> {});
+            var registry = new ProviderRegistry(() -> {}, () -> 0);
             var registration = registry.register("SneakyConfigurableVoice", "rebuilt", "voice-routing-1", provider);
             registry.start(new Diagnostics.Capture("shared", "now", System.nanoTime(), 5, 60));
             Object mode = modeType.getEnumConstants()[0];

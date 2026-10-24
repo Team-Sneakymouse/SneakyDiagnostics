@@ -13,8 +13,11 @@ import com.teamsneakymouse.sneakydiagnostics.timeline.TimelineCollector;
 import com.teamsneakymouse.sneakydiagnostics.api.Diagnostics;
 import com.teamsneakymouse.sneakydiagnostics.integration.PluginCollector;
 import com.teamsneakymouse.sneakydiagnostics.integration.ProviderRegistry;
+import com.teamsneakymouse.sneakydiagnostics.report.ReportCommand;
 import com.teamsneakymouse.sneakydiagnostics.spark.SparkCollector;
 import com.teamsneakymouse.sneakydiagnostics.spark.ReflectiveSparkProfiler;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,6 +33,7 @@ import org.bukkit.plugin.ServicePriority;
 
 /** Command routing and coordinated starts; collectors own their capture state. */
 public final class SneakyDiagnosticsPlugin extends JavaPlugin {
+    private static final String REPORTS_PERMISSION = "sneakydiagnostics.reports";
     private final Map<String, DiagnosticCollector> collectors = new LinkedHashMap<>();
     private EntityCensusCollector entities;
     private ReportWriter reports;
@@ -44,7 +48,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
         var scheduler = new SchedulerCollector(this, reports);
         providers = new ProviderRegistry(() -> {
             if (!Bukkit.isPrimaryThread()) throw new IllegalStateException("Diagnostics lifecycle must run on the server thread");
-        });
+        }, Bukkit::getCurrentTick);
         var plugins = new PluginCollector(providers, reports);
         var spark = new SparkCollector(new ReflectiveSparkProfiler(getServer()), reports);
         for (var collector : List.of(entities, timeline, scheduler, plugins, spark, connections)) collectors.put(collector.name(), collector);
@@ -68,6 +72,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
 
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         boolean legacy = command.getName().equalsIgnoreCase("entitycensus");
+        if (!legacy && args.length > 0 && args[0].equalsIgnoreCase("reports")) return reportsCommand(sender, args);
         String name = legacy ? "entities" : args.length == 0 ? "all" : args[0].toLowerCase(Locale.ROOT);
         if (!name.equals("all") && !collectors.containsKey(name)) { help(sender, label); return true; }
         if (!allowed(sender, name, legacy)) { sender.sendMessage("Missing permission: " + (legacy ? "sneaky.entitycensus" : "sneakydiagnostics." + name)); return true; }
@@ -84,13 +89,13 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                             return player == null ? null : player.getUniqueId();
                         });
                         var context = CaptureContext.create(parsed.seconds());
-                        coordinator.start(selected, false, collector -> ((ConnectionCollector) collector)
+                        coordinator.start(selected, context, false, collector -> ((ConnectionCollector) collector)
                                 .start(context, List.of(), parsed.targets()));
                         sender.sendMessage("Started connections: " + context.id() + ", " + parsed.seconds()
                                 + " seconds; " + parsed.targets().size() + " targets numbered in supplied order. Everyone else remains the comparison baseline.");
                         break;
                     }
-                    var parsed = CaptureArguments.start(name, options);
+                    var parsed = CaptureArguments.start(name, options, providers.providers());
                     List<World> worlds = Bukkit.getWorlds();
                     if (parsed.world() != null) {
                         World world = Bukkit.getWorld(parsed.world());
@@ -98,8 +103,14 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                         worlds = List.of(world);
                     }
                     CaptureContext context = CaptureContext.create(parsed.seconds());
-                    coordinator.start(selected, context, worlds, name.equals("all"));
-                    sender.sendMessage("Started " + name + ": " + context.id() + ", " + parsed.seconds() + " seconds. Reports share this capture ID.");
+                    List<World> startWorlds = worlds;
+                    coordinator.start(selected, context, name.equals("all"), collector -> {
+                        if (collector instanceof PluginCollector pluginCollector) pluginCollector.start(context, startWorlds, parsed.plugins());
+                        else collector.start(context, startWorlds);
+                    });
+                    sender.sendMessage("Started " + name + ": " + context.id() + ", " + parsed.seconds() + " seconds"
+                            + (parsed.plugins().isEmpty() ? "" : "; providers: " + String.join(", ", parsed.plugins()))
+                            + ". Reports share this capture ID.");
                 }
                 case "resume" -> {
                     if (!name.equals("entities")) throw new IllegalArgumentException("Resume is available for entities only");
@@ -128,6 +139,24 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
         return true;
     }
 
+    /** {@code reports list|prune}: runs on the server thread, so busy checks and deletion cannot race a new capture. */
+    private boolean reportsCommand(CommandSender sender, String[] args) {
+        if (!sender.hasPermission(REPORTS_PERMISSION)) { sender.sendMessage("Missing permission: " + REPORTS_PERMISSION); return true; }
+        try {
+            // Status text carries the capture ID of every active or resumable capture.
+            for (String line : ReportCommand.run(getDataFolder().toPath().resolve("reports"), Arrays.copyOfRange(args, 1, args.length), Instant.now(),
+                    id -> reports.pendingCapture(id) || collectors.values().stream().anyMatch(collector -> collector.status().contains(id)))) {
+                sender.sendMessage(line);
+            }
+        } catch (IllegalArgumentException e) {
+            sender.sendMessage(e.getMessage());
+        } catch (RuntimeException e) {
+            getLogger().log(Level.SEVERE, "Diagnostics reports command failed", e);
+            sender.sendMessage("Diagnostics reports command failed; see the server log.");
+        }
+        return true;
+    }
+
     private static void noOptions(String[] options) {
         if (options.length != 0) throw new IllegalArgumentException("status and stop take no additional arguments");
     }
@@ -137,10 +166,21 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
     }
 
     private static void help(CommandSender sender, String label) {
-        sender.sendMessage("/" + label + " <entities|timeline|scheduler|plugins|spark|connections|all> <start|status|stop>; entities also supports resume.");
+        sender.sendMessage("/" + label + " <entities|timeline|scheduler|plugins|spark|connections|all> <start|status|stop>; entities also supports resume. "
+                + "plugins start [seconds] [provider ...]; all start [seconds] [world] [plugins=<provider>,<provider>].");
     }
 
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        boolean legacy = command.getName().equalsIgnoreCase("entitycensus");
+        if (legacy || args.length == 0 || !sender.hasPermission(REPORTS_PERMISSION)) return collectorCompletions(sender, command, alias, args);
+        if (args[0].equalsIgnoreCase("reports")) return ReportCommand.complete(Arrays.copyOfRange(args, 1, args.length));
+        if (args.length != 1) return collectorCompletions(sender, command, alias, args);
+        var names = new ArrayList<>(collectorCompletions(sender, command, alias, args));
+        if ("reports".startsWith(args[0].toLowerCase(Locale.ROOT))) names.add("reports");
+        return names;
+    }
+
+    private List<String> collectorCompletions(CommandSender sender, Command command, String alias, String[] args) {
         boolean legacy = command.getName().equalsIgnoreCase("entitycensus");
         if (!legacy && args.length == 1) {
             return List.of("entities", "timeline", "scheduler", "plugins", "spark", "connections", "all").stream()
@@ -159,10 +199,20 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                 return Bukkit.getOnlinePlayers().stream().map(org.bukkit.entity.Player::getName)
                         .filter(player -> player.toLowerCase(Locale.ROOT).startsWith(prefix)).toList();
             }
+            if (name.equals("plugins")) {
+                var typed = Arrays.asList(args).subList(actionIndex + 1, args.length - 1);
+                return CaptureArguments.completeProviders(providers.providers(), typed, args[args.length - 1]);
+            }
+            if (name.equals("all") && args[args.length - 1].toLowerCase(Locale.ROOT).startsWith("plugins=")) {
+                return CaptureArguments.completePluginsOption(providers.providers(), args[args.length - 1]);
+            }
             if (name.equals("entities") && args.length == actionIndex + 2
-                    || name.equals("all") && args.length == actionIndex + 3) {
+                    || name.equals("all") && args.length >= actionIndex + 2 && args.length <= actionIndex + 3) {
                 String prefix = args[args.length - 1];
-                return Bukkit.getWorlds().stream().map(World::getName).filter(world -> world.startsWith(prefix)).toList();
+                var matches = new java.util.ArrayList<>(Bukkit.getWorlds().stream().map(World::getName).filter(world -> world.startsWith(prefix)).toList());
+                if (name.equals("all") && "plugins=".startsWith(prefix.toLowerCase(Locale.ROOT))
+                        && Arrays.stream(args).noneMatch(arg -> arg.toLowerCase(Locale.ROOT).startsWith("plugins="))) matches.add("plugins=");
+                return matches;
             }
         }
         return List.of();

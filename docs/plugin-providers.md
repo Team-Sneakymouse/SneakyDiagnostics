@@ -1,38 +1,327 @@
-# Plugin diagnostics providers
+# Plugin diagnostics: measuring your plugin
 
-SneakyDiagnostics publishes `io.github.team-sneakymouse:SneakyDiagnostics-API:<version>`.
-The API contains one interface, `com.teamsneakymouse.sneakydiagnostics.api.Diagnostics`,
-with nested capture, provider, result and registration types. It has no Bukkit dependency.
-The SneakyDiagnostics plugin bundles the API and registers its implementation with Bukkit's
-`ServicesManager`. Provider plugins compile against the API and must **not shade or relocate it**.
-The API, plugin and Ignite companion share the commit-derived version
-(`yyyy.MM.dd-<hash>`) and are published together by the `Publish Maven` workflow
-or `./gradlew publishAll`. Replace `<version>` below with a published Diagnostics
-version. Existing consumers pinned to the previously published API `1.0.0` can
-continue using that release.
+SneakyDiagnostics can record what your plugin costs while a capture runs (`/diagnostics plugins start`, or as
+part of `/diagnostics all start`). You add a small shim class and a few `probe.start()/end()` calls. Without a
+capture, or without SneakyDiagnostics installed, they do nothing. The service keeps all timing, aggregation and
+reporting; do **not** write your own.
 
-## Build and registration
+The API is published as `io.github.team-sneakymouse:SneakyDiagnostics-API:<version>`, `<version>` being the
+commit-derived `yyyy.MM.dd-<hash>` of a SneakyDiagnostics release that contains `Diagnostics.probe(...)`. The
+API, plugin and Ignite companion share that version and are published together (`Publish Maven` workflow or
+`./gradlew publishAll`). Never shade or relocate the API; the SneakyDiagnostics plugin JAR carries it.
 
-```groovy
+## 1. Quick start
+
+**Build.** Compile against the API only; it is not bundled. Keep the existing repositories block.
+
+```kotlin
 repositories {
-    maven { url = uri("https://maven.sneakyrp.com/releases") }
+    maven("https://maven.sneakyrp.com/releases")
 }
 dependencies {
     compileOnly("io.github.team-sneakymouse:SneakyDiagnostics-API:<version>")
 }
 ```
 
-For local development before remote publication, run `./gradlew :api:publishToMavenLocal`
-in SneakyDiagnostics and add a `mavenLocal` repository restricted to this module in the provider.
-The API JAR is a library; install only the SneakyDiagnostics plugin JAR on the server.
+For local development before publication run `./gradlew :api:publishToMavenLocal` in SneakyDiagnostics and
+add `mavenLocal()` to your repositories. `plugin.yml` must name it as a soft dependency (a hard `depend` is
+only for plugins that cannot run without it):
 
-Add `softdepend: [SneakyDiagnostics]` to the provider's `plugin.yml`. Keep the API-dependent
-adapter in a separate class and load it only when SneakyDiagnostics is enabled. A hard
-`depend` is also supported when diagnostics is required for that plugin's operation.
+```yaml
+softdepend: [SneakyDiagnostics]
+```
 
-After the provider plugin has finished loading, register on the server thread:
+**The shim.** Save this as `integration/Probe.java` in your plugin: put your own `package` line first and copy the
+rest unchanged. It is the only class that touches the API, it contains no timing or aggregation logic, and
+the file is identical in every plugin.
 
 ```java
+import com.teamsneakymouse.sneakydiagnostics.api.Diagnostics;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.server.ServiceRegisterEvent;
+import org.bukkit.event.server.ServiceUnregisterEvent;
+import org.bukkit.plugin.Plugin;
+
+/**
+ * This plugin's measurements for SneakyDiagnostics (optional: without it every method below does nothing).
+ * Keep API types out of every method signature (Bukkit reflects over them when registering events).
+ */
+public final class Probe implements Listener {
+    private static final String SERVICE = "com.teamsneakymouse.sneakydiagnostics.api.Diagnostics";
+    private final Plugin plugin;
+    private final String instrumentation;
+    private Diagnostics.Probe probe; // null unless SneakyDiagnostics is enabled; the only member naming an API type
+
+    public Probe(Plugin plugin, String instrumentation) {
+        this.plugin = plugin;
+        this.instrumentation = instrumentation;
+    }
+
+    /** Call at the end of onEnable (server thread). Attaches now if SneakyDiagnostics is enabled, and again whenever it (re)appears. */
+    public void hook() {
+        plugin.getServer().getPluginManager().registerEvents(this, plugin);
+        if (plugin.getServer().getPluginManager().isPluginEnabled("SneakyDiagnostics")) attach();
+    }
+
+    /** Call first thing in onDisable (server thread). */
+    public void unhook() { detach(); }
+
+    public long start() { var p = probe; return p == null ? 0 : p.start(); }
+    public void end(String section, long token) { var p = probe; if (p != null) p.end(section, token); }
+    public void count(String key) { count(key, 1); }
+    public void count(String key, long n) { var p = probe; if (p != null) p.count(key, n); }
+    public boolean sampleDue() { var p = probe; return p != null && p.sampleDue(); }
+    public void level(String key, long value) { var p = probe; if (p != null) p.level(key, value); }
+    public boolean on() { var p = probe; return p != null && p.on(); }
+
+    @EventHandler public void onServiceUp(ServiceRegisterEvent event) {
+        if (SERVICE.equals(event.getProvider().getService().getName())) attach();
+    }
+
+    @EventHandler public void onServiceDown(ServiceUnregisterEvent event) {
+        if (SERVICE.equals(event.getProvider().getService().getName())) detach();
+    }
+
+    private void attach() {
+        detach();
+        try {
+            Diagnostics diagnostics = plugin.getServer().getServicesManager().load(Diagnostics.class);
+            if (diagnostics != null) probe = diagnostics.probe(plugin.getName(), plugin.getPluginMeta().getVersion(), instrumentation);
+        } catch (RuntimeException | LinkageError e) {
+            plugin.getLogger().warning("Couldn't register with SneakyDiagnostics (" + e + "); its captures won't include " + plugin.getName() + ".");
+        }
+    }
+
+    private void detach() {
+        var p = probe;
+        probe = null;
+        if (p == null) return;
+        try { p.close(); } catch (RuntimeException e) { plugin.getLogger().warning("Couldn't leave SneakyDiagnostics: " + e); }
+    }
+}
+```
+
+How it stays safe when SneakyDiagnostics is missing, and why it looks like this, is explained under
+[Why the shim looks like this](#why-the-shim-looks-like-this). Do not add other methods to it, and never put an
+API type (`Diagnostics`, `Diagnostics.Probe`, ...) in a method signature, field outside this class, or lambda.
+
+**Wire it up.** Create the probe once, call `hook()` at the end of `onEnable` and `unhook()` first thing in
+`onDisable`. The instrumentation version names what your sections mean; see [Rules](#2-rules).
+
+```java
+private final Probe probe = new Probe(this, "myplugin-ticks-2");
+
+@Override public void onEnable() {
+    // ... existing setup ...
+    probe.hook();
+}
+
+@Override public void onDisable() {
+    probe.unhook();
+    // ... existing teardown ...
+}
+```
+
+**Sections, counters and levels.**
+
+- `long t = probe.start(); ...; probe.end("name", t);` times a piece of server-thread work (wall time).
+- `probe.count("name")` or `probe.count("name", n)`: something happened.
+- `if (probe.sampleDue()) { probe.level("name", value); ... }`: how much of something there is now, sampled
+  about once a second during a capture.
+
+A tick loop with nested sections, a counter, and levels including the entity ownership levels:
+
+```java
+private void tickAll() {
+    long tick = probe.start();
+    long ts = probe.start();
+    deliver();
+    probe.end("tick.deliveries", ts);
+    ts = probe.start();
+    for (Machine machine : machines) {
+        long tm = probe.start();
+        machine.tick();
+        if (tm != 0) probe.end("machine." + machine.type(), tm);
+    }
+    probe.end("tick.machines", ts);
+    probe.count("machines.ticked", machines.size());
+    if (probe.sampleDue()) {
+        probe.level("machines", machines.size());
+        probe.level("entities.owned", owned.size());
+        Map<EntityType, Integer> byType = new EnumMap<>(EntityType.class);
+        for (Entity entity : owned) byType.merge(entity.getType(), 1, Integer::sum);
+        for (var entry : byType.entrySet()) {
+            probe.level("entities.owned." + entry.getKey().name().toLowerCase(Locale.ROOT), entry.getValue());
+        }
+    }
+    probe.end("tick", tick);
+}
+```
+
+An event handler (`try/finally` so an early return or exception still ends the section):
+
+```java
+@EventHandler
+public void onEntitiesLoad(EntitiesLoadEvent event) {
+    long t = probe.start();
+    try {
+        for (Entity entity : event.getEntities()) register(entity);
+    } finally {
+        probe.end("event.entities-load", t);
+    }
+}
+```
+
+These snippets and the shim are compiled by the SneakyDiagnostics tests
+(`plugin/src/test/java/.../integration/reference/`), so they build as written.
+
+## 2. Rules
+
+1. **Fixed labels only.** Names are constants or come from a small closed set (machine type, spell key, event
+   name). At most **256 distinct names per kind** (sections, counts, levels), each at most 192 characters;
+   more are dropped, counted in `omittedKeys`, and make your report incomplete. Never put player names, UUIDs,
+   locations, item text or other free text into a name.
+2. **Guard string building.** When no capture runs `start()` returns 0 and `end/count/level` return at once, but
+   `"machine." + type` would still allocate. Build a name only after the token check
+   (`if (t != 0) probe.end("machine." + type, t);`), and build level names inside `if (probe.sampleDue())`.
+   A counter with a built name goes in `if (probe.on())`. Constant names need no guard.
+3. **Nest sections strictly (LIFO).** End an inner section before its outer one, and never overlap two sections
+   that are not nested. `selfNanos` (time not spent in nested sections) is exact only then; `nestingErrors` in
+   the report counts violations and must be 0. Do not nest a section inside one with the same name.
+4. **`try/finally` around early returns.** Every `start()` must reach its `end()` on every path, including
+   `return`, `continue`, `break` and exceptions. When unsure, wrap the work in `try { ... } finally { probe.end(...); }`.
+5. **Server thread only.** The probe is not thread safe. Never call it from async tasks, other threads or
+   packet/voice threads; count such work on the server thread when it is delivered.
+6. **Naming conventions.**
+
+   | Kind | Name | Example |
+   |---|---|---|
+   | whole tick of the plugin | `tick` | `tick` |
+   | a part of the tick | `tick.<part>` | `tick.deliveries` |
+   | an event handler | `event.<name>` | `event.entities-load` |
+   | work per type | `<kind>.<type>` | `machine.Crusher`, `spell.fireball` |
+   | counter | dotted, past tense | `energy.arrived` |
+   | level | the thing counted | `placed`, `deliveries.pending` |
+
+   Lowercase with `-` between words, `.` between parts.
+7. **Entity ownership levels.** If your plugin owns entities (displays, armor stands, NPCs, mobs it spawns),
+   report them as levels, inside `sampleDue()`: `entities.owned` (total) and
+   `entities.owned.<bukkit entity type, lowercase>` (for example `entities.owned.item_display`). Counts per
+   type only: no per-chunk or per-entity data. See `report-schema-v2.md`.
+8. **Instrumentation version.** `<plugin>-ticks-<n>` (lowercase plugin name). Increase `n` whenever what a report
+   means changes: a name is added, removed or renamed, a section is moved to another place in the nesting, a
+   level starts counting something else. Never reuse a number for a different meaning. A new plugin release with
+   unchanged instrumentation does not bump it (the plugin version is reported separately). Tools compare
+   captures only within one instrumentation version.
+9. **Keep it cheap.** One section per meaningful piece (a tick, a phase, a handler, a kind of work), not per
+   entity or per block.
+
+## 3. Migrating from a copied Probe
+
+For plugins that carry `integration/Probe.java` and `integration/DiagnosticsBridge.java`
+(SneakyWizards, SneakyRacials, SneakyCCTV, SneakySwitches, SneakyAppliances, SneakyPowerplant, SneakyCasino,
+SneakyHeist). Call sites such as `probe.start()`, `probe.end("x", t)`, `probe.count("x")`, `probe.sampleDue()`
+and `probe.level("x", n)` keep working unchanged, because the shim has the same method names.
+
+1. **Bump the API dependency** in `build.gradle.kts`: set the `compileOnly("io.github.team-sneakymouse:SneakyDiagnostics-API:...")`
+   version to the `<version>` the integrator gives you. Keep `softdepend: [SneakyDiagnostics]` in `plugin.yml`.
+2. **Delete** `integration/Probe.java` and `integration/DiagnosticsBridge.java`.
+3. **Add the shim** from [Quick start](#1-quick-start) as `integration/Probe.java` (same class name and package as
+   the deleted file, so existing imports still resolve; only the `package` line differs between plugins).
+4. **Replace the hook code in the main class.** Remove the `AutoCloseable diagnostics` field, `hookDiagnostics()` and
+   `unhookDiagnostics()`. Change the probe field to `new Probe(this, "<plugin>-ticks-2")` (the old one was
+   `new Probe()`), call `probe.hook()` where `hookDiagnostics()` was called (end of `onEnable`) and
+   `probe.unhook()` where `unhookDiagnostics()` was (first thing in `onDisable`). Keep the `probe()` getter if other
+   classes use it.
+5. **Keep the call sites** where the method names match. Then check each one:
+   - every `start()` has its `end()` on all paths and sections nest strictly (Rules 3 and 4); the old probe did
+     not require this;
+   - section names are still fixed labels and fewer than 256 per kind (Rule 1).
+6. **Guard string building.** Find every name that is built, for example with
+   `grep -nE 'probe\.(end|count|level)\(.*\+' -r src`, and guard it as in Rule 2:
+
+   ```diff
+   -probe.end("placed." + p.getClass().getSimpleName(), ts);
+   +if (ts != 0) probe.end("placed." + p.getClass().getSimpleName(), ts);
+   ```
+
+   Also move any aggregation that only feeds `level(...)` (maps, `TreeMap`s, loops over all things) inside
+   `if (probe.sampleDue())`; the old code already did this for the sampling block, keep it that way.
+7. **Add the entity-owned levels** if the plugin owns entities (Rule 7), inside the existing `sampleDue()` block.
+8. **Bump the instrumentation version** from `<plugin>-ticks-1` to `<plugin>-ticks-2` (the report now has self
+   time, percentiles, the slowest calls and per-second series).
+9. **Shrink the README "Diagnostics" section** to three lines pointing here, plus the plugin's own section and
+   level names:
+
+   ```markdown
+   ## Diagnostics
+   Measured by [SneakyDiagnostics](https://github.com/Team-Sneakymouse/SneakyDiagnostics) when it is installed (optional): `/diagnostics plugins start 30 <Plugin>`.
+   Setup and rules: [plugin-providers.md](https://github.com/Team-Sneakymouse/SneakyDiagnostics/blob/main/docs/plugin-providers.md).
+   Sections: `tick`, `tick.<part>`, ...; counts: `...`; levels: `...`, `entities.owned`, `entities.owned.<type>`.
+   ```
+
+10. **Remove tests of the old `Probe`** (anything calling `begin`, `finish`, `complete` or reading its maps). The shim has
+    no logic to test; the service tests cover the recorder.
+11. Run the [verification checklist](#4-verification-checklist).
+
+## 4. Verification checklist
+
+- [ ] `./gradlew build` passes; the plugin JAR contains no `com/teamsneakymouse/sneakydiagnostics/api` classes.
+- [ ] `grep -nE 'probe\.(end|count|level)\(.*\+' -r src` shows only guarded calls (Rule 2); no `Diagnostics` type
+      is mentioned anywhere except `integration/Probe.java`.
+- [ ] With SneakyDiagnostics installed, start the server: no warnings about SneakyDiagnostics in the log, and
+      `/diagnostics plugins status` lists your plugin.
+- [ ] `/diagnostics plugins start 30 <Plugin>` while exercising the plugin, then look in the capture folder: a
+      `plugins-<slug>-1.json` exists (`<slug>` is the lowercased plugin name; read the `file` field of
+      `plugins-1.json`). In it `measurements.schema` is `sneakydiagnostics.probe/1`, `complete` is `true`,
+      `measurements.omittedKeys` is 0 and `measurements.nestingErrors` is 0. Your `tick` section is present.
+- [ ] `/diagnostics plugins status` shows no capture running afterwards, and with no capture nothing is measured or
+      allocated: the code review above is the check (constant names and guarded built names only).
+- [ ] Reload only SneakyDiagnostics (plugin manager, or disable and enable it): `/diagnostics plugins status`
+      lists your plugin again without restarting it.
+- [ ] Remove SneakyDiagnostics from `plugins/` and start the server: your plugin enables and works, with no
+      `NoClassDefFoundError` and no warning.
+
+## Why the shim looks like this
+
+The consumer must run when SneakyDiagnostics (and so the API classes) is absent. The JVM links lazily: a
+missing class fails only when an instruction that names it executes (or when reflection reads a signature that
+names it). The shim therefore:
+
+- names API types only as the type of one private field and inside method bodies. The field stays `null` until
+  `attach()` runs, which happens only when `isPluginEnabled("SneakyDiagnostics")` is true in `hook()` or when
+  Bukkit announces the `Diagnostics` service; the other methods return before touching it. The service is
+  recognised by class **name**, because `Diagnostics.class` would load the class;
+- has no API type in any method signature or lambda. Bukkit's `registerEvents` reflects over every declared
+  method of a listener, which resolves their parameter and return types and would fail;
+- is a plain class in your plugin with the call-site methods of the old `Probe`: off cost is a field read and a
+  null check. With the service present and no capture, it is one interface call that returns after a boolean
+  check (nothing timed, built or allocated);
+- uses the service-returned `Diagnostics.Probe` only through the interface, loaded from SneakyDiagnostics'
+  classloader, so there is no shading and no class-identity problem. All other types are Bukkit or JDK types.
+  The handle is created per plugin by the service (`Diagnostics.probe(...)`), which owns the recorder and reports
+  it like any other provider;
+- catches `RuntimeException` and `LinkageError` while attaching, so an older SneakyDiagnostics without
+  `probe(...)` leaves the plugin running with measurements off and one warning;
+- survives a SneakyDiagnostics-only reload: when SneakyDiagnostics is disabled it unregisters its service
+  (`ServiceUnregisterEvent`, the shim drops the dead handle), and when it is enabled again its service is
+  registered (`ServiceRegisterEvent`, the shim asks the new service for a fresh handle). Start order does not matter
+  either: if SneakyDiagnostics enables after your plugin, the same event attaches it. A capture running during a
+  reload is ended by SneakyDiagnostics (reason `diagnostics_disable`) and is not continued.
+
+Test: `ProbeShimTest` loads the shim through a classloader that hides the API package and runs every method
+with the service absent.
+
+## Custom providers (v1 API)
+
+Use this only when the shared probe does not fit (asynchronous measurements, a domain-specific report). MagicSpells
+and SneakyConfigurableVoice do. The API's `Diagnostics.register` stays supported unchanged; the report is the
+provider's own free-form `measurements`. The same optional-dependency rules apply: keep the API-dependent adapter
+in a separate class that is loaded only when SneakyDiagnostics is enabled, and re-register on `ServiceRegisterEvent`
+(see the shim for the pattern).
+
+```java v1-sketch
 Diagnostics diagnostics = plugin.getServer().getServicesManager().load(Diagnostics.class);
 Diagnostics.Registration registration = diagnostics.register(
     plugin.getName(), plugin.getPluginMeta().getVersion(), "my-measurements-1",
@@ -46,14 +335,12 @@ Diagnostics.Registration registration = diagnostics.register(
     });
 ```
 
-`recorder` above is the plugin's bounded measurement implementation. Close `registration`
-on the server thread **before** reload or disable clears measured state. Re-register after
-reload has completed. Close is idempotent; an old handle cannot remove a newer registration.
-MagicSpells and SneakyConfigurableVoice provide concrete examples. MagicSpells records
-server-thread scopes; Voice uses a fixed-size, thread-safe recorder for overlapping
-microphone handlers and scheduled delivery.
+`recorder` is the plugin's bounded measurement implementation. Close `registration` on the server thread
+**before** reload or disable clears measured state. Close is idempotent; an old handle cannot remove a newer
+registration. MagicSpells records server-thread scopes; Voice uses a fixed-size, thread-safe recorder for
+overlapping microphone handlers and scheduled delivery.
 
-## Capture contract
+## Capture contract (v1 providers; the shared probe follows it for you)
 
 - SneakyDiagnostics calls `start` and `stop` on the server thread. Registration, deregistration
   and service shutdown also require that thread. Async measurements need a thread-safe recorder
@@ -86,10 +373,23 @@ microphone handlers and scheduled delivery.
 
 ## Reports and verification
 
-`plugins-1.json` is written under the normal capture folder. Its `providers` array identifies
-each participating plugin/build/instrumentation version, start status, completion reason,
-coverage and detached measurements. No registered providers means no plugin measurements.
-It does not imply zero plugin cost. `/diagnostics plugins status` lists registered probes.
+`plugins-1.json` is written under the normal capture folder as an index. Its `providers` array
+identifies each participating plugin/build/instrumentation version, start status, completion
+reason, per-provider coverage (`complete`), any error, and the `file` holding its measurements.
+`incompleteProviders` lists providers with partial coverage or an error; they do not by
+themselves make the collector `complete` false, which means only that the capture ended as
+`completed` and no provider failed to start or stop. `selected` is `"all"` or the chosen names.
+Each provider's detached measurements are in `plugins-<provider>-1.json` (lowercased name with
+characters outside `[a-z0-9._-]` replaced by `_`; later collisions get `~2`, `~3`; use the index
+`file` field). That file repeats the standard header with the provider's own `plugin`,
+`pluginVersion`, `instrumentationVersion`, `reason`, `complete` and `error`, and a free-form
+`measurements` object exactly as the provider returned it (omitted if the provider failed).
+No registered providers means no plugin measurements, not zero plugin cost.
+
+Providers participate by default. `/diagnostics plugins start [seconds] [provider ...]` and
+`/diagnostics all start [seconds] [world] [plugins=<a>,<b>]` start only the named providers
+(case-insensitive exact match, at most 32; unknown or duplicate names reject the start).
+`/diagnostics plugins status` lists registered providers. See `docs/report-schema-v2.md`.
 
 Run the consumer/provider classloader check after building the instrumented MagicSpells plugin:
 

@@ -86,7 +86,7 @@ public final class VelocityConnections {
     public synchronized void stop(String reason) {
         if (capture == null) return;
         Map<String, Object> report = new LinkedHashMap<>();
-        report.put("schemaVersion", 1);
+        report.put("schemaVersion", 2);
         report.put("collector", "connections");
         report.put("platform", "velocity");
         report.put("captureId", id);

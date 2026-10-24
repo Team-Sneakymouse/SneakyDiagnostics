@@ -37,9 +37,11 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 /diagnostics timeline start 60
 /diagnostics scheduler start 60
 /diagnostics plugins start 60
+/diagnostics plugins start 60 MagicSpells Voice
 /diagnostics spark start 120
 /diagnostics connections start 120
 /diagnostics all start 60 world
+/diagnostics all start 60 plugins=MagicSpells,Voice
 /diagnostics all status
 /diagnostics all stop
 ```
@@ -51,16 +53,30 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 | `/diagnostics entities` | `start [world] [seconds]` or `start [seconds]` | `sneakydiagnostics.entities` |
 | `/diagnostics timeline` | `start [seconds]` | `sneakydiagnostics.timeline` |
 | `/diagnostics scheduler` | `start [seconds]` | `sneakydiagnostics.scheduler` |
-| `/diagnostics plugins` | `start [seconds]` | `sneakydiagnostics.plugins` |
+| `/diagnostics plugins` | `start [seconds] [provider ...]` | `sneakydiagnostics.plugins` |
 | `/diagnostics spark` | `start [seconds]` | `sneakydiagnostics.spark` |
 | `/diagnostics connections` | `start [seconds] [player ...]` | `sneakydiagnostics.connections` |
-| `/diagnostics all` | `start [seconds] [world]` | `sneakydiagnostics.all` |
+| `/diagnostics all` | `start [seconds] [world] [plugins=<provider>,<provider>]` | `sneakydiagnostics.all` |
 
 All Paper permissions default to operators. `sneakydiagnostics.all` includes the six individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
 
 `all start` validates every collector before starting, and shares a capture ID, timestamp, and monotonic clock across all reports. It rejects busy collectors, including pending report writes, and rolls back partial starts. Individual captures can overlap independently; starting or resuming another capture is blocked while a coordinated capture is still active. `all stop` stops all active collectors, including independently started ones. A census may finish before the requested time if it reaches the end of its traversal; timeline and scheduler collection continue for their full window.
 
-Completion logs absolute paths under `plugins/SneakyDiagnostics/reports/<capture-id>/`. Each collector writes its own JSON file, such as `entities-1.json`, `timeline-1.json`, or `scheduler-1.json`. Stop writes partial reports. Files have the shared capture identity and offsets as well as their actual completion reason and collector-specific coverage information.
+Completion logs absolute paths under `plugins/SneakyDiagnostics/reports/<capture-id>/`. Each collector writes its own JSON file, such as `entities-1.json`, `timeline-1.json`, or `scheduler-1.json`. Stop writes partial reports. Files have the shared capture identity and offsets as well as their actual completion reason and collector-specific coverage information. Every report header carries `"schemaVersion": 2`; the layout contract is in [docs/report-schema-v2.md](docs/report-schema-v2.md).
+
+A JSON report whose serialized size exceeds 1 MiB is written gzip-compressed as `<name>.json.gz` (for example `entities-1.json.gz`); smaller reports stay `.json`. The size is measured after serialization, so it is the same threshold for every collector. The `.sparkprofile` export and `manifest.json` are never compressed. Readers should accept both forms; `zcat`, `gzip -dc` or any gzip library reads them.
+
+Each capture folder also holds `manifest.json`, an index of that capture only (overlapping captures have their own folders and manifests). It records the server and Java versions, the diagnostics version, every enabled plugin with its version, and workload counts at the start and end of the capture: online player count and, per world, loaded chunks and entities. Player names, UUIDs and locations are never included. `workload.atEnd` is sampled when the capture's last active collector finishes and is `null` if that never happens. Its `files` array lists every file written so far with its collector, segment, size as stored (`bytes`), `uncompressedBytes`, the SHA-256 of the file as stored, `complete`, `reason`, and `writtenAt`. Resumed census segments (`entities-2.json`) appear as additional entries. The manifest is rewritten after every file through a temporary file and an atomic move, so it is valid at any moment, including after a partial capture or an interrupted server.
+
+Reports are never deleted automatically. List and prune them with:
+
+```text
+/diagnostics reports list
+/diagnostics reports prune keep 20
+/diagnostics reports prune keep 20 confirm
+```
+
+`reports list` shows each capture folder's id, age, file count and total size, newest first by capture start. The start time comes from the manifest, otherwise from a report header, otherwise from the folder's modification time, so older UUIDv4 folders and new UUIDv7 folders sort together. `reports prune keep <n>` without `confirm` only prints what it would delete. With `confirm` it deletes every capture folder except the newest `n`. A capture that is still running (including a paused, resumable census) or has a report being written is skipped and reported. Only directories directly under `reports/` whose names are capture IDs are considered; symbolic links are ignored and never followed, a folder containing an unexpected subdirectory is left untouched and reported, and I/O errors are reported per folder. Requires `sneakydiagnostics.reports` (default operator). It is not part of `sneakydiagnostics.all`, because it deletes data.
 
 New capture IDs use UUIDv7 with the capture start's Unix millisecond timestamp, so their folder names sort chronologically to millisecond precision. IDs created within the same millisecond have random ordering. Existing UUIDv4 capture folders retain their IDs and do not sort chronologically alongside new captures; use report timestamps when comparing both formats.
 
@@ -112,7 +128,7 @@ The scanner targets 2 ms per tick, at most 200 examined entities and eight visit
 
 Only loaded chunks with entities already loaded are read. No chunks are loaded or held with tickets. Bukkit state is accessed on the server thread; report grouping and serialization happen on a separate writer thread using detached records. Each world's loaded-chunk list is obtained when that world is reached. New chunks and entities can appear during collection; this is an incremental census, not a simultaneous snapshot. Resume keeps references to the pending chunk/entity arrays and up to 500,000 deduplication UUIDs. It rechecks chunk/world availability and entity validity; it does not revisit entities arriving in chunks already processed. Per-entity observation offsets and skip/error counters expose some of that uncertainty. UUID deduplication avoids counting an entity twice if it moves between chunks or between segments.
 
-Label lists are capped at 64 entries and each label at 128 characters, with truncation flagged. Report files are not automatically deleted. On plugin disable an active partial report is queued, and the writer is allowed to finish; an abrupt process exit can still interrupt a write.
+Label lists are capped at 64 entries and each label at 128 characters, with truncation flagged. Report files are not automatically deleted; see `reports prune`. On plugin disable an active partial report is queued, and the writer is allowed to finish; an abrupt process exit can still interrupt a write.
 
 Tracking subscriptions are not measurements of tracker CPU time, update frequency, or rejected visibility checks. This plugin identifies candidate groups for a subsequent targeted NMS probe if necessary.
 
@@ -182,9 +198,13 @@ New/missing task IDs between complete snapshots describe observed churn. They ar
 
 ## Plugin measurements
 
+Plugins measure themselves through the shared probe in the SneakyDiagnostics API: `Diagnostics.probe(plugin, version, instrumentation)` returns a handle with `start`/`end`, `count` and `level`, which the service records and reports like any other provider (one `plugins-<provider>-1.json` per plugin, `sneakydiagnostics.probe/1`, with self time, percentiles, the slowest calls and per-second series). Nothing is timed or allocated unless a capture runs, and a plugin keeps working, unmeasured, when SneakyDiagnostics is absent or reloaded alone. [docs/plugin-providers.md](docs/plugin-providers.md) has the quick start, the rules, the migration steps for plugins that carry a copied `Probe`, and the verification checklist.
+
 The instrumented MagicSpells build (based on `b462388fcc10`, published baseline `2026.10.16-b462388fcc10`) registers a provider through the typed SneakyDiagnostics API. `/diagnostics plugins start 60` collects its existing spell, subspell, passive, event, scheduled-task, reagent and inventory-scan timings. `/diagnostics all start 60` includes the same measurements with the entities, timeline and scheduler captures.
 
-Reports use `plugins-1.json` in the shared capture folder. Each provider reports its build and instrumentation version, completion reason, coverage and measurements. MagicSpells includes calls, inclusive/self/max nanoseconds, inventory slots and item-match counts. Timings are server-thread wall time; async execution is excluded. Inclusive rows overlap one another and scheduler probes. Instrumentation `magicspells-execution-2` preserves independent global, operation and loaded-spell aggregates when detail overflows. Detail capacity is calculated from the provider report allowance after reserving aggregate space; `limits.maxDetailKeys` reports the effective budget. Rank spells by `spellTotals.selfNanos` and inspect `totalsComplete`, `spellTotalsComplete`, `operationTotalsComplete` and `detailComplete` separately. Oversized spell exports retain combined omitted totals instead of losing the entire provider report.
+By default every registered provider participates. `plugins start [seconds] [provider ...]` and the `plugins=<provider>,<provider>` option of `all start` select providers instead; only those are started and the others are absent from the report. Names are matched case-insensitively against registered plugin names (Tab completes them), at most 32 per start. An unknown or duplicate name rejects the whole start before anything runs. The duration may be omitted when the first option is not an integer, for example `/diagnostics plugins start MagicSpells`. `/diagnostics plugins status` lists registered providers and, during a capture, the selection.
+
+The shared capture folder gets `plugins-1.json`, an index with the selection, one entry per provider (build and instrumentation version, start status, completion reason, per-provider `complete`, error, and the `file` holding its data), `incompleteProviders`, and the collector `complete` flag. Each provider's measurements are in its own file, `plugins-<provider>-1.json`, where `<provider>` is the lowercased plugin name with characters outside `[a-z0-9._-]` replaced by `_` (later names that collapse to the same slug get `~2`, `~3`); read the index `file` field rather than deriving names. A provider that only partly covered the capture is listed in `incompleteProviders` and does not make the collector incomplete; the collector is incomplete when the capture did not end as `completed` or a provider failed to start or stop. See [report schema v2](docs/report-schema-v2.md). MagicSpells includes calls, inclusive/self/max nanoseconds, inventory slots and item-match counts. Timings are server-thread wall time; async execution is excluded. Inclusive rows overlap one another and scheduler probes. Instrumentation `magicspells-execution-2` preserves independent global, operation and loaded-spell aggregates when detail overflows. Detail capacity is calculated from the provider report allowance after reserving aggregate space; `limits.maxDetailKeys` reports the effective budget. Rank spells by `spellTotals.selfNanos` and inspect `totalsComplete`, `spellTotalsComplete`, `operationTotalsComplete` and `detailComplete` separately. Oversized spell exports retain combined omitted totals instead of losing the entire provider report.
 
 Instrumentation `magicspells-execution-3` adds canonical `spellKey` with configured spelling and a bounded `taskLifecycle` section. Boundary inventories include tasks registered before capture, group pending work by spell/source/kind/delay/interval, and report age/creation ranges. The largest 512 groups are ranked before export truncation. Counters distinguish helper registrations, repeating executions, one-shot completion and cancellation requests/removals. Check `inventoryComplete`, `lifecycleComplete`, unknown metadata/owners, overflow and actual observation offsets independently of timing coverage. Next-run ticks are explicitly unavailable through the public scheduler. Direct Bukkit work has unknown historical metadata; external removals are reconciled without inferring cancellation or execution counts. `allPluginLifecycleComplete` is false: direct tasks can appear and disappear between observations. An end snapshot after the event deadline explicitly leaves an uncovered interval. Registry metadata is capped at 65,536 entries, removed on supported termination and cleared on reload/disable; external cancellation metadata is reconciled at capture boundaries. See [provider details](docs/plugin-providers.md#magicspells-scheduler-capture).
 
