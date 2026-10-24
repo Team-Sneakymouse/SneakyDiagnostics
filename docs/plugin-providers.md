@@ -1,15 +1,15 @@
 # Plugin diagnostics providers
 
-SneakyDiagnostics publishes `io.github.team-sneakymouse:SneakyDiagnostics-API:1.0.0`.
+SneakyDiagnostics publishes `io.github.team-sneakymouse:SneakyDiagnostics-API:<version>`.
 The API contains one interface, `com.teamsneakymouse.sneakydiagnostics.api.Diagnostics`,
 with nested capture, provider, result and registration types. It has no Bukkit dependency.
 The SneakyDiagnostics plugin bundles the API and registers its implementation with Bukkit's
 `ServicesManager`. Provider plugins compile against the API and must **not shade or relocate it**.
-The API has a stable version independent of the plugin's commit-derived version.
-Release it with the manual `Publish Diagnostics API` workflow or `./gradlew publishApi`.
-Publish version 1.0.0 before the MagicSpells integration is built in CI. Ordinary
-`publishAll` runs publish the plugin and Ignite companion only, avoiding redeployment
-of an existing API release. Bump the version in the root build before releasing API changes.
+The API, plugin and Ignite companion share the commit-derived version
+(`yyyy.MM.dd-<hash>`) and are published together by the `Publish Maven` workflow
+or `./gradlew publishAll`. Replace `<version>` below with a published Diagnostics
+version. Existing consumers pinned to the previously published API `1.0.0` can
+continue using that release.
 
 ## Build and registration
 
@@ -18,7 +18,7 @@ repositories {
     maven { url = uri("https://maven.sneakyrp.com/releases") }
 }
 dependencies {
-    compileOnly("io.github.team-sneakymouse:SneakyDiagnostics-API:1.0.0")
+    compileOnly("io.github.team-sneakymouse:SneakyDiagnostics-API:<version>")
 }
 ```
 

@@ -15,7 +15,7 @@ For scheduler execution and cancellation attribution, copy `ignite/build/libs/Sn
 ## Repository layout
 
 ```text
-api/                      Stable provider interface (SneakyDiagnostics-API:1.0.0)
+api/                      Provider interface (SneakyDiagnostics-API:<version>)
 plugin/                   Paper plugin, collectors, commands, and tests
 ignite/                   Optional Ignite scheduler Mixins and hook tests
 build.gradle.kts          Shared version, Java toolchain, and publishing
@@ -69,7 +69,7 @@ The first useful capture is during the sustained 11–15 TPS condition. With the
 The public repository is [Team-Sneakymouse/SneakyDiagnostics](https://github.com/Team-Sneakymouse/SneakyDiagnostics).
 Pushes to `main` and manual runs of the `Publish Maven` workflow build and check all modules before publishing the plugin and companion artifact sets (JAR, sources JAR, and POM) to `https://maven.sneakyrp.com/releases`. Each remote publication depends on the repository's complete checks.
 
-Maven coordinates are `io.github.team-sneakymouse:SneakyDiagnostics:<version>` for the plugin and `io.github.team-sneakymouse:SneakyDiagnostics-Ignite:<version>` for the companion. The plugin's existing coordinates are preserved. The plugin and companion use the same version derived from the commit date in UTC and its 12-character hash: `yyyy.MM.dd-<hash>`. A committed Git checkout is required to build. The provider library is `io.github.team-sneakymouse:SneakyDiagnostics-API:1.0.0`; it has an independent stable interface version and is bundled inside the Paper plugin. Release it once per API version through the manual `Publish Diagnostics API` workflow or `publishApi`; it is excluded from ordinary `publishAll` runs. Publish the first API release before building the MagicSpells integration in CI.
+Maven coordinates are `io.github.team-sneakymouse:SneakyDiagnostics:<version>` for the plugin and `io.github.team-sneakymouse:SneakyDiagnostics-Ignite:<version>` for the companion. The plugin's existing coordinates are preserved. The API, plugin and companion use the same version derived from the commit date in UTC and its 12-character hash: `yyyy.MM.dd-<hash>`. A committed Git checkout is required to build. The provider library is `io.github.team-sneakymouse:SneakyDiagnostics-API:<version>` and is bundled inside the plugin. The `Publish Maven` workflow and `publishAll` publish all three artifacts together. Existing consumers pinned to API `1.0.0` can keep using that published release; new API releases use the commit-derived version.
 
 Each deployable plugin/companion Maven POM includes a custom `sneakyrp.deployment.type` property for deployment automation:
 
@@ -82,7 +82,7 @@ Read the version's `.pom` alongside its main JAR and select installation handlin
 
 CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have access to `INFISICAL_IDENTITY_ID` and `INFISICAL_DOMAIN` GitHub Actions secrets, and the identity must authorize this repository. Infisical project `lords-of-minecraft`, environment `prod`, path `/Maven` must provide `MAVEN_USERNAME` and `MAVEN_PASSWORD`.
 
-For publishing from a local checkout, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishAll`. The original `publishMavenPublicationToSneakyrpRepository` command remains an alias that publishes the plugin and companion. Never commit credentials. Root `publishToMavenLocal` can verify all three publications without remote credentials.
+For publishing from a local checkout, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishAll`. The original `publishMavenPublicationToSneakyrpRepository` command remains an alias that publishes the API, plugin and companion. Never commit credentials. Root `publishToMavenLocal` can verify all three publications without remote credentials.
 
 `SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, `scheduler`, and `integration` own their collection state. The Paper plugin uses public APIs; the optional Ignite companion instruments scheduler internals. There is no automatic capture.
 

@@ -19,7 +19,7 @@ subprojects {
     apply(plugin = "java")
     apply(plugin = "maven-publish")
     group = rootProject.group
-    version = if (name == "api") "1.0.0" else rootProject.version
+    version = rootProject.version
     val artifactName = when (name) {
         "api" -> "${rootProject.name}-API"
         "plugin" -> rootProject.name
@@ -85,15 +85,10 @@ tasks.clean { dependsOn(":api:clean", ":plugin:clean", ":ignite:clean") }
 
 tasks.register("publishAll") {
     group = "publishing"
-    description = "Checks all modules and publishes the plugin and companion."
-    dependsOn(":plugin:publishMavenPublicationToSneakyrpRepository", ":ignite:publishMavenPublicationToSneakyrpRepository")
+    description = "Checks and publishes the API, plugin and companion together."
+    dependsOn(":api:publishMavenPublicationToSneakyrpRepository", ":plugin:publishMavenPublicationToSneakyrpRepository", ":ignite:publishMavenPublicationToSneakyrpRepository")
 }
 
-tasks.register("publishApi") {
-    group = "publishing"
-    description = "Releases the independently versioned provider API; bump its version before another release."
-    dependsOn(":api:publishMavenPublicationToSneakyrpRepository")
-}
 // Preserve the original repository-level publishing command.
 tasks.register("publishMavenPublicationToSneakyrpRepository") {
     group = "publishing"
