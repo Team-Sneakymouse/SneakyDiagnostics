@@ -3,7 +3,8 @@
 SneakyDiagnostics can record what your plugin costs while a capture runs (`/diagnostics plugins start`, or as
 part of `/diagnostics all start`). You add a small shim class and a few `probe.start()/end()` calls. Without a
 capture, or without SneakyDiagnostics installed, they do nothing. The service keeps all timing, aggregation and
-reporting; do **not** write your own.
+reporting; do **not** write your own. (Plugins whose measurements cannot be expressed this way are the exception:
+see [Choosing: shared probe or custom provider](#choosing-shared-probe-or-custom-provider).)
 
 The API is published as `io.github.team-sneakymouse:SneakyDiagnostics-API:<version>`, `<version>` being the
 commit-derived `yyyy.MM.dd-<hash>` of a SneakyDiagnostics release that contains `Diagnostics.probe(...)`. The
@@ -330,13 +331,49 @@ names it). The shim therefore:
 Test: `ProbeShimTest` loads the shim through a classloader that hides the API package and runs every method
 with the service absent.
 
+## Choosing: shared probe or custom provider
+
+The shared probe is for **simple plugins**: work that runs on the server thread, nests cleanly, and fits a small
+fixed set of labels (parts of a tick, event handlers, kinds of work). SneakyWizards, Racials, CCTV, Switches,
+Appliances, Powerplant, Casino and Heist use it. Use a **custom provider** (the v1 API below) when the measurement
+cannot be expressed that way:
+
+| Use the shared probe when | Use a custom provider when |
+|---|---|
+| everything runs on the server thread | work runs on other threads (SneakyConfigurableVoice records on voice threads; the probe is server-thread only) |
+| a fixed label set describes the work (`tick.<part>`, `event.<name>`, `<kind>.<type>`) | the data is dimensional or high-cardinality, with exact aggregates that must survive detail overflow (MagicSpells: per spell and operation, plus scheduler task lifecycle) |
+| sections nest strictly | scopes overlap or are unfinished at the capture boundary |
+
+This is a rule of thumb, not a ban in either direction. Strict consolidation of the measurement vocabulary was
+considered and rejected: forcing MagicSpells or Voice into sections, counts and levels would discard the data the
+production investigations rely on.
+
+**What every provider shares anyway:** registration and selection (`/diagnostics plugins start ... <Plugin>`), the
+per-provider report file and its own `complete` flag, the capture manifest, and re-registration after a
+Diagnostics-only reload. Only the contents of `measurements` differ.
+
+**What a custom provider costs:**
+1. **Tooling:** its `measurements` are free-form. There are no per-second series, percentiles or slowest-call
+   offsets, so slow timeline windows cannot be attributed to it. The analysis tools carry provider-specific recovery
+   code (for example MagicSpells' mixed-case spell totals) and refuse to rank if the fields they rely on change
+   meaning. Changing a custom provider's report means changing the tools in the same step.
+2. **Duplicated lifecycle code:** each custom provider keeps its own copy of the small `DiagnosticsAttachment`
+   class (see MagicSpells `util/performance` and SneakyConfigurableVoice `diagnostics`), as the shim does. A copy per
+   plugin is required so the API class is never loaded when SneakyDiagnostics is absent; a change to the pattern
+   must be applied in every copy.
+3. **One provider per plugin name:** a plugin cannot use the shared probe for a few coarse sections alongside its
+   custom provider. Placing a spike in time (MagicSpells' 692 ms variable save is the known case) would need
+   either two registrations per plugin or a custom provider that embeds a probe. Neither exists yet.
+
 ## Custom providers (v1 API)
 
-Use this only when the shared probe does not fit (asynchronous measurements, a domain-specific report). MagicSpells
-and SneakyConfigurableVoice do. The API's `Diagnostics.register` stays supported unchanged; the report is the
-provider's own free-form `measurements`. The same optional-dependency rules apply: keep the API-dependent adapter
-in a separate class that is loaded only when SneakyDiagnostics is enabled, and re-register on `ServiceRegisterEvent`
-(see the shim for the pattern).
+Use this only when the shared probe does not fit (see above). MagicSpells and SneakyConfigurableVoice do. The API's
+`Diagnostics.register` stays supported unchanged; the report is the provider's own free-form `measurements`. The
+same optional-dependency rules apply: keep the API-dependent adapter in a separate class that is loaded only when
+SneakyDiagnostics' service exists, and register again whenever the `Diagnostics` service reappears
+(`ServiceRegisterEvent`/`ServiceUnregisterEvent`, matched by class name). Copy the `DiagnosticsAttachment` class
+from MagicSpells or SneakyConfigurableVoice for that; it takes a registrar that registers and returns the action
+that unregisters.
 
 ```java v1-sketch
 Diagnostics diagnostics = plugin.getServer().getServicesManager().load(Diagnostics.class);
