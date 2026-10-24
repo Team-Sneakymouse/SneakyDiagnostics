@@ -89,7 +89,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                             return player == null ? null : player.getUniqueId();
                         });
                         var context = CaptureContext.create(parsed.seconds());
-                        coordinator.start(selected, false, collector -> ((ConnectionCollector) collector)
+                        coordinator.start(selected, context, false, collector -> ((ConnectionCollector) collector)
                                 .start(context, List.of(), parsed.targets()));
                         sender.sendMessage("Started connections: " + context.id() + ", " + parsed.seconds()
                                 + " seconds; " + parsed.targets().size() + " targets numbered in supplied order. Everyone else remains the comparison baseline.");
@@ -104,7 +104,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                     }
                     CaptureContext context = CaptureContext.create(parsed.seconds());
                     List<World> startWorlds = worlds;
-                    coordinator.start(selected, name.equals("all"), collector -> {
+                    coordinator.start(selected, context, name.equals("all"), collector -> {
                         if (collector instanceof PluginCollector pluginCollector) pluginCollector.start(context, startWorlds, parsed.plugins());
                         else collector.start(context, startWorlds);
                     });
