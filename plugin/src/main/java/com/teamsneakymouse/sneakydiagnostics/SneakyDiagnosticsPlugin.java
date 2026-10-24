@@ -13,8 +13,11 @@ import com.teamsneakymouse.sneakydiagnostics.timeline.TimelineCollector;
 import com.teamsneakymouse.sneakydiagnostics.api.Diagnostics;
 import com.teamsneakymouse.sneakydiagnostics.integration.PluginCollector;
 import com.teamsneakymouse.sneakydiagnostics.integration.ProviderRegistry;
+import com.teamsneakymouse.sneakydiagnostics.report.ReportCommand;
 import com.teamsneakymouse.sneakydiagnostics.spark.SparkCollector;
 import com.teamsneakymouse.sneakydiagnostics.spark.ReflectiveSparkProfiler;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -30,6 +33,7 @@ import org.bukkit.plugin.ServicePriority;
 
 /** Command routing and coordinated starts; collectors own their capture state. */
 public final class SneakyDiagnosticsPlugin extends JavaPlugin {
+    private static final String REPORTS_PERMISSION = "sneakydiagnostics.reports";
     private final Map<String, DiagnosticCollector> collectors = new LinkedHashMap<>();
     private EntityCensusCollector entities;
     private ReportWriter reports;
@@ -68,6 +72,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
 
     @Override public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         boolean legacy = command.getName().equalsIgnoreCase("entitycensus");
+        if (!legacy && args.length > 0 && args[0].equalsIgnoreCase("reports")) return reportsCommand(sender, args);
         String name = legacy ? "entities" : args.length == 0 ? "all" : args[0].toLowerCase(Locale.ROOT);
         if (!name.equals("all") && !collectors.containsKey(name)) { help(sender, label); return true; }
         if (!allowed(sender, name, legacy)) { sender.sendMessage("Missing permission: " + (legacy ? "sneaky.entitycensus" : "sneakydiagnostics." + name)); return true; }
@@ -128,6 +133,24 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
         return true;
     }
 
+    /** {@code reports list|prune}: runs on the server thread, so busy checks and deletion cannot race a new capture. */
+    private boolean reportsCommand(CommandSender sender, String[] args) {
+        if (!sender.hasPermission(REPORTS_PERMISSION)) { sender.sendMessage("Missing permission: " + REPORTS_PERMISSION); return true; }
+        try {
+            // Status text carries the capture ID of every active or resumable capture.
+            for (String line : ReportCommand.run(getDataFolder().toPath().resolve("reports"), Arrays.copyOfRange(args, 1, args.length), Instant.now(),
+                    id -> reports.pendingCapture(id) || collectors.values().stream().anyMatch(collector -> collector.status().contains(id)))) {
+                sender.sendMessage(line);
+            }
+        } catch (IllegalArgumentException e) {
+            sender.sendMessage(e.getMessage());
+        } catch (RuntimeException e) {
+            getLogger().log(Level.SEVERE, "Diagnostics reports command failed", e);
+            sender.sendMessage("Diagnostics reports command failed; see the server log.");
+        }
+        return true;
+    }
+
     private static void noOptions(String[] options) {
         if (options.length != 0) throw new IllegalArgumentException("status and stop take no additional arguments");
     }
@@ -141,6 +164,16 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
     }
 
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        boolean legacy = command.getName().equalsIgnoreCase("entitycensus");
+        if (legacy || args.length == 0 || !sender.hasPermission(REPORTS_PERMISSION)) return collectorCompletions(sender, command, alias, args);
+        if (args[0].equalsIgnoreCase("reports")) return ReportCommand.complete(Arrays.copyOfRange(args, 1, args.length));
+        if (args.length != 1) return collectorCompletions(sender, command, alias, args);
+        var names = new ArrayList<>(collectorCompletions(sender, command, alias, args));
+        if ("reports".startsWith(args[0].toLowerCase(Locale.ROOT))) names.add("reports");
+        return names;
+    }
+
+    private List<String> collectorCompletions(CommandSender sender, Command command, String alias, String[] args) {
         boolean legacy = command.getName().equalsIgnoreCase("entitycensus");
         if (!legacy && args.length == 1) {
             return List.of("entities", "timeline", "scheduler", "plugins", "spark", "connections", "all").stream()

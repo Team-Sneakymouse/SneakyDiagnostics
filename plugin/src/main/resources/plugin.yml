@@ -26,6 +26,9 @@ permissions:
       sneakydiagnostics.plugins: true
       sneakydiagnostics.spark: true
       sneakydiagnostics.connections: true
+  sneakydiagnostics.reports:
+    description: List and prune saved capture folders (not implied by sneakydiagnostics.all)
+    default: op
   sneakydiagnostics.connections:
     description: Collect and control connection latency reports
     default: op
