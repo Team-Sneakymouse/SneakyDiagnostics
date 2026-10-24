@@ -1,20 +1,42 @@
 package com.teamsneakymouse.sneakydiagnostics.integration;
 
 import com.teamsneakymouse.sneakydiagnostics.api.Diagnostics;
+import com.teamsneakymouse.sneakydiagnostics.probe.ProbeRecorder;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.IntSupplier;
+import java.util.function.LongSupplier;
 
 /** Owns provider lifecycle, including partial starts and unloads during a capture. */
 public final class ProviderRegistry implements Diagnostics, AutoCloseable {
     private final Map<String, Entry> providers = new LinkedHashMap<>();
     private final Runnable checkThread;
+    private final IntSupplier tick;
+    private final LongSupplier nanos;
     private List<Run> runs;
     private boolean closed;
 
-    public ProviderRegistry(Runnable checkThread) { this.checkThread = checkThread; }
+    /** {@code tick} is the server's current tick (Bukkit::getCurrentTick), injected so the registry runs without Bukkit. */
+    public ProviderRegistry(Runnable checkThread, IntSupplier tick) { this(checkThread, tick, System::nanoTime); }
+
+    public ProviderRegistry(Runnable checkThread, IntSupplier tick, LongSupplier nanos) {
+        this.checkThread = checkThread;
+        this.tick = tick;
+        this.nanos = nanos;
+    }
+
+    /** One recorder per plugin, registered as an ordinary provider so it is selected, written and completed like any other. */
+    @Override public Probe probe(String plugin, String version, String instrumentation) {
+        var recorder = new ProbeRecorder(nanos, tick);
+        var registration = register(plugin, version, instrumentation, new Provider() {
+            @Override public void start(Capture capture) { recorder.begin(capture.startedNanos(), capture.seconds(), capture.startTick()); }
+            @Override public Result stop(String reason) { return new Result(recorder.finish(reason), recorder.complete()); }
+        });
+        return new ProbeHandle(recorder, registration);
+    }
 
     @Override public Registration register(String plugin, String version, String instrumentation, Provider provider) {
         checkThread.run();
@@ -72,6 +94,17 @@ public final class ProviderRegistry implements Diagnostics, AutoCloseable {
         closed = true;
         stop("diagnostics_disable");
         providers.clear();
+    }
+
+    /** Server thread only by contract: deliberately no per-call thread check on the hot path. */
+    private record ProbeHandle(ProbeRecorder recorder, Registration registration) implements Probe {
+        @Override public long start() { return recorder.start(); }
+        @Override public void end(String section, long token) { recorder.end(section, token); }
+        @Override public void count(String key, long n) { recorder.count(key, n); }
+        @Override public boolean sampleDue() { return recorder.sampleDue(); }
+        @Override public void level(String key, long value) { recorder.level(key, value); }
+        @Override public boolean on() { return recorder.on(); }
+        @Override public void close() { registration.close(); }
     }
 
     private record Entry(String plugin, String version, String instrumentation, Provider provider) {}

@@ -8,7 +8,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ProviderRegistryTest {
-    private final ProviderRegistry registry = new ProviderRegistry(() -> {});
+    private final ProviderRegistry registry = new ProviderRegistry(() -> {}, () -> 0);
     private final Diagnostics.Capture capture = new Diagnostics.Capture("shared", "now", 123, 5, 1800);
 
     @Test void providersShareIdentityAndDeadlineAndReturnDetachedReports() {
@@ -143,7 +143,7 @@ class ProviderRegistryTest {
         var cycle = new ArrayList<Object>();
         cycle.add(cycle);
         for (Object invalid : List.of(cycle, java.util.Collections.nCopies(250_001, 0), Double.NaN, "x".repeat(1025))) {
-            var bounded = new ProviderRegistry(() -> {});
+            var bounded = new ProviderRegistry(() -> {}, () -> 0);
             bounded.register("bad", "v", "i", new Probe() {
                 @Override public Diagnostics.Result stop(String reason) {
                     return new Diagnostics.Result(Map.of("value", invalid), true);
@@ -158,7 +158,7 @@ class ProviderRegistryTest {
     }
 
     @Test void lifecycleEnforcesTheThreadContract() {
-        var guarded = new ProviderRegistry(() -> { throw new IllegalStateException("wrong thread"); });
+        var guarded = new ProviderRegistry(() -> { throw new IllegalStateException("wrong thread"); }, () -> 0);
         assertThrows(IllegalStateException.class, () -> guarded.register("p", "v", "i", new Probe()));
         assertThrows(IllegalStateException.class, () -> guarded.start(capture));
     }
@@ -169,5 +169,118 @@ class ProviderRegistryTest {
         final List<Map<String, Object>> rows = new ArrayList<>(List.of(Map.of("calls", 7)));
         @Override public void start(Diagnostics.Capture capture) { this.capture = capture; }
         @Override public Diagnostics.Result stop(String reason) { stops++; return new Diagnostics.Result(Map.of("rows", rows), true); }
+    }
+
+    // ---- shared probe -------------------------------------------------------------------------------------------
+
+    private long now = 10_000_000_000L;
+    private int tick = 50;
+    private final ProviderRegistry probes = new ProviderRegistry(() -> {}, () -> tick, () -> now);
+
+    private Diagnostics.Capture probeCapture(int seconds) { return new Diagnostics.Capture("probe", "then", now, tick, seconds); }
+
+    @SuppressWarnings("unchecked") private static Map<String, Object> map(Object o) { return (Map<String, Object>) o; }
+
+    @Test void probeIsReportedLikeAnyProviderWithTicksFromTheInjectedSupplier() {
+        var probe = probes.probe("Wizards", "1.2", "wizards-ticks-2");
+        var v1 = new Probe();
+        probes.register("Voice", "v", "i", v1);
+        assertEquals(0, probe.start());   // off outside a capture
+        assertFalse(probe.on());
+        probes.start(probeCapture(60));
+        assertTrue(probe.on());
+        long t = probe.start();
+        now += 5_000;
+        tick = 52;
+        probe.end("tick", t);
+        probe.count("spells");
+        probe.count("spells", 2);
+        assertTrue(probe.sampleDue());
+        probe.level("placed", 7);
+        var rows = probes.stop("completed");
+        var row = rows.getFirst();
+        assertEquals("Wizards", row.get("plugin"));
+        assertEquals("wizards-ticks-2", row.get("instrumentationVersion"));
+        assertEquals(true, row.get("complete"));
+        var measurements = map(row.get("measurements"));
+        assertEquals("sneakydiagnostics.probe/1", measurements.get("schema"));
+        assertEquals(3L, map(measurements.get("counts")).get("spells"));
+        assertEquals(7L, map(map(measurements.get("levels")).get("placed")).get("last"));
+        var section = map(((List<?>) measurements.get("sections")).getFirst());
+        assertEquals("tick", section.get("name"));
+        assertEquals(52L, section.get("maxAtTick"));
+        assertEquals(5_000L, section.get("totalNanos"));
+        assertEquals("Voice", rows.get(1).get("plugin"));   // v1 providers keep working beside it
+        assertEquals(true, rows.get(1).get("complete"));
+        assertFalse(probe.on());
+    }
+
+    @Test void probeSelectionAndRepeatedCapturesStartFresh() {
+        var first = probes.probe("A", "v", "i");
+        var second = probes.probe("B", "v", "i");
+        probes.start(probeCapture(30), List.of("B"));
+        first.count("ignored");
+        second.count("kept");
+        var rows = probes.stop("completed");
+        assertEquals(1, rows.size());
+        assertEquals(Map.of("kept", 1L), map(rows.getFirst().get("measurements")).get("counts"));
+        probes.start(probeCapture(30), List.of("B"));
+        assertEquals(Map.of(), map(map(probes.stop("completed").getFirst().get("measurements"))).get("counts"));
+    }
+
+    @Test void closingAProbeMidCaptureKeepsItsPartialResultAndFreesTheName() {
+        var probe = probes.probe("A", "v", "i");
+        var other = probes.probe("B", "v", "i");
+        probes.start(probeCapture(30));
+        probe.count("before");
+        probe.close();
+        probe.close();
+        probe.count("after");
+        other.count("still");
+        assertFalse(probe.on());
+        var rows = probes.stop("completed");
+        assertEquals("provider_unregistered", rows.getFirst().get("reason"));
+        assertEquals(false, rows.getFirst().get("complete"));
+        assertEquals(Map.of("before", 1L), map(rows.getFirst().get("measurements")).get("counts"));
+        assertEquals(true, rows.get(1).get("complete"));
+        assertDoesNotThrow(() -> probes.probe("A", "v2", "i"));
+        assertEquals(List.of("B", "A"), probes.providers());
+    }
+
+    @Test void probeRejectsDuplicateNamesAcrossBothRegistrationStyles() {
+        probes.probe("A", "v", "i");
+        assertThrows(IllegalStateException.class, () -> probes.probe("A", "v", "i"));
+        assertThrows(IllegalStateException.class, () -> probes.register("A", "v", "i", new Probe()));
+        probes.register("B", "v", "i", new Probe());
+        assertThrows(IllegalStateException.class, () -> probes.probe("B", "v", "i"));
+        assertThrows(IllegalArgumentException.class, () -> probes.probe(" ", "v", "i"));
+        assertEquals(List.of("A", "B"), probes.providers());
+    }
+
+    @Test void closingTheServiceEndsTheProbeAndLeavesTheOldHandleHarmless() {
+        var probe = probes.probe("A", "v", "i");
+        probes.start(probeCapture(30));
+        probes.close();
+        assertFalse(probe.on());
+        assertEquals(0, probe.start());
+        assertDoesNotThrow(probe::close);
+        assertThrows(IllegalStateException.class, () -> probes.probe("A", "v", "i"));
+    }
+
+    @Test void aFullLengthProbeCaptureFitsTheProviderReportLimits() {
+        var probe = probes.probe("Big", "v", "i");
+        probes.start(probeCapture(1800));
+        for (int s = 0; s < 1800; s++) {
+            for (int name = 0; name < 20; name++) {
+                long t = probe.start();
+                now += 1_000;
+                probe.end("section." + name, t);
+            }
+            now += 1_000_000_000L - 20_000;
+        }
+        var row = probes.stop("completed").getFirst();
+        assertEquals(true, row.get("complete"));
+        assertNull(row.get("error"));
+        assertTrue(row.containsKey("measurements"));
     }
 }

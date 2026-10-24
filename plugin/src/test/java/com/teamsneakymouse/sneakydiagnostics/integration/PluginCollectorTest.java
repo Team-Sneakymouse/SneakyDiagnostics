@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class PluginCollectorTest {
-    private final ProviderRegistry registry = new ProviderRegistry(() -> {});
+    private final ProviderRegistry registry = new ProviderRegistry(() -> {}, () -> 0);
     private final Sink sink = new Sink();
     private final PluginCollector collector = new PluginCollector(registry, sink);
     private final CaptureContext context = new CaptureContext("shared", "now", System.nanoTime() - 2_000_000_000L, 4, 1);

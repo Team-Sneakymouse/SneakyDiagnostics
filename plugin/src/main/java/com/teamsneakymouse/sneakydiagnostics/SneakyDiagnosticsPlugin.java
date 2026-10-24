@@ -48,7 +48,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
         var scheduler = new SchedulerCollector(this, reports);
         providers = new ProviderRegistry(() -> {
             if (!Bukkit.isPrimaryThread()) throw new IllegalStateException("Diagnostics lifecycle must run on the server thread");
-        });
+        }, Bukkit::getCurrentTick);
         var plugins = new PluginCollector(providers, reports);
         var spark = new SparkCollector(new ReflectiveSparkProfiler(getServer()), reports);
         for (var collector : List.of(entities, timeline, scheduler, plugins, spark, connections)) collectors.put(collector.name(), collector);

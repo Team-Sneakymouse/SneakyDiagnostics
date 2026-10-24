@@ -39,7 +39,7 @@ class MagicSpellsJarTest {
             constructor.setAccessible(true);
             var probe = (Diagnostics.Provider) constructor.newInstance(recorder, java.util.Set.of("Mixed-Spell"), tasks,
                     (java.util.function.Supplier<Iterable<?>>) () -> pending);
-            var registry = new ProviderRegistry(() -> {});
+            var registry = new ProviderRegistry(() -> {}, () -> 0);
             var registration = registry.register("MagicSpells", "rebuilt", "magicspells-execution-3", probe);
             registry.start(new Diagnostics.Capture("lifecycle", "now", System.nanoTime(), 0, 60));
             callbacks.get(0).run();
@@ -84,7 +84,7 @@ class MagicSpellsJarTest {
             var constructor = probeType.getDeclaredConstructor(recorderType, java.util.Set.class);
             constructor.setAccessible(true);
             var probe = (Diagnostics.Provider) constructor.newInstance(recorder, java.util.Set.of("stress"));
-            var registry = new ProviderRegistry(() -> {});
+            var registry = new ProviderRegistry(() -> {}, () -> 0);
             registry.register("MagicSpells", "rebuilt", "magicspells-execution-2", probe);
             registry.start(new Diagnostics.Capture("saturated", "now", System.nanoTime(), 5, 60));
             var enter = recorderType.getMethod("enter", String.class, String.class, String.class);
@@ -128,7 +128,7 @@ class MagicSpellsJarTest {
             var constructor = probeType.getDeclaredConstructor(recorderType, java.util.Set.class);
             constructor.setAccessible(true);
             var probe = (Diagnostics.Provider) constructor.newInstance(recorder, java.util.Set.of("integration-test"));
-            var registry = new ProviderRegistry(() -> {});
+            var registry = new ProviderRegistry(() -> {}, () -> 0);
             var registration = registry.register("MagicSpells", "rebuilt", "magicspells-execution-2", probe);
             registry.start(new Diagnostics.Capture("shared", "now", System.nanoTime(), 5, 60));
             try (var scope = (AutoCloseable) recorderType.getMethod("enter", String.class, String.class, String.class)
