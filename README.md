@@ -37,9 +37,11 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 /diagnostics timeline start 60
 /diagnostics scheduler start 60
 /diagnostics plugins start 60
+/diagnostics plugins start 60 MagicSpells Voice
 /diagnostics spark start 120
 /diagnostics connections start 120
 /diagnostics all start 60 world
+/diagnostics all start 60 plugins=MagicSpells,Voice
 /diagnostics all status
 /diagnostics all stop
 ```
@@ -51,10 +53,10 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 | `/diagnostics entities` | `start [world] [seconds]` or `start [seconds]` | `sneakydiagnostics.entities` |
 | `/diagnostics timeline` | `start [seconds]` | `sneakydiagnostics.timeline` |
 | `/diagnostics scheduler` | `start [seconds]` | `sneakydiagnostics.scheduler` |
-| `/diagnostics plugins` | `start [seconds]` | `sneakydiagnostics.plugins` |
+| `/diagnostics plugins` | `start [seconds] [provider ...]` | `sneakydiagnostics.plugins` |
 | `/diagnostics spark` | `start [seconds]` | `sneakydiagnostics.spark` |
 | `/diagnostics connections` | `start [seconds] [player ...]` | `sneakydiagnostics.connections` |
-| `/diagnostics all` | `start [seconds] [world]` | `sneakydiagnostics.all` |
+| `/diagnostics all` | `start [seconds] [world] [plugins=<provider>,<provider>]` | `sneakydiagnostics.all` |
 
 All Paper permissions default to operators. `sneakydiagnostics.all` includes the six individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
 
@@ -184,7 +186,9 @@ New/missing task IDs between complete snapshots describe observed churn. They ar
 
 The instrumented MagicSpells build (based on `b462388fcc10`, published baseline `2026.10.16-b462388fcc10`) registers a provider through the typed SneakyDiagnostics API. `/diagnostics plugins start 60` collects its existing spell, subspell, passive, event, scheduled-task, reagent and inventory-scan timings. `/diagnostics all start 60` includes the same measurements with the entities, timeline and scheduler captures.
 
-Reports use `plugins-1.json` in the shared capture folder. Each provider reports its build and instrumentation version, completion reason, coverage and measurements. MagicSpells includes calls, inclusive/self/max nanoseconds, inventory slots and item-match counts. Timings are server-thread wall time; async execution is excluded. Inclusive rows overlap one another and scheduler probes. Instrumentation `magicspells-execution-2` preserves independent global, operation and loaded-spell aggregates when detail overflows. Detail capacity is calculated from the provider report allowance after reserving aggregate space; `limits.maxDetailKeys` reports the effective budget. Rank spells by `spellTotals.selfNanos` and inspect `totalsComplete`, `spellTotalsComplete`, `operationTotalsComplete` and `detailComplete` separately. Oversized spell exports retain combined omitted totals instead of losing the entire provider report.
+By default every registered provider participates. `plugins start [seconds] [provider ...]` and the `plugins=<provider>,<provider>` option of `all start` select providers instead; only those are started and the others are absent from the report. Names are matched case-insensitively against registered plugin names (Tab completes them), at most 32 per start. An unknown or duplicate name rejects the whole start before anything runs. The duration may be omitted when the first option is not an integer, for example `/diagnostics plugins start MagicSpells`. `/diagnostics plugins status` lists registered providers and, during a capture, the selection.
+
+The shared capture folder gets `plugins-1.json`, an index with the selection, one entry per provider (build and instrumentation version, start status, completion reason, per-provider `complete`, error, and the `file` holding its data), `incompleteProviders`, and the collector `complete` flag. Each provider's measurements are in its own file, `plugins-<provider>-1.json`, where `<provider>` is the lowercased plugin name with characters outside `[a-z0-9._-]` replaced by `_` (later names that collapse to the same slug get `~2`, `~3`); read the index `file` field rather than deriving names. A provider that only partly covered the capture is listed in `incompleteProviders` and does not make the collector incomplete; the collector is incomplete when the capture did not end as `completed` or a provider failed to start or stop. See [report schema v2](docs/report-schema-v2.md). MagicSpells includes calls, inclusive/self/max nanoseconds, inventory slots and item-match counts. Timings are server-thread wall time; async execution is excluded. Inclusive rows overlap one another and scheduler probes. Instrumentation `magicspells-execution-2` preserves independent global, operation and loaded-spell aggregates when detail overflows. Detail capacity is calculated from the provider report allowance after reserving aggregate space; `limits.maxDetailKeys` reports the effective budget. Rank spells by `spellTotals.selfNanos` and inspect `totalsComplete`, `spellTotalsComplete`, `operationTotalsComplete` and `detailComplete` separately. Oversized spell exports retain combined omitted totals instead of losing the entire provider report.
 
 Instrumentation `magicspells-execution-3` adds canonical `spellKey` with configured spelling and a bounded `taskLifecycle` section. Boundary inventories include tasks registered before capture, group pending work by spell/source/kind/delay/interval, and report age/creation ranges. The largest 512 groups are ranked before export truncation. Counters distinguish helper registrations, repeating executions, one-shot completion and cancellation requests/removals. Check `inventoryComplete`, `lifecycleComplete`, unknown metadata/owners, overflow and actual observation offsets independently of timing coverage. Next-run ticks are explicitly unavailable through the public scheduler. Direct Bukkit work has unknown historical metadata; external removals are reconciled without inferring cancellation or execution counts. `allPluginLifecycleComplete` is false: direct tasks can appear and disappear between observations. An end snapshot after the event deadline explicitly leaves an uncovered interval. Registry metadata is capped at 65,536 entries, removed on supported termination and cleared on reload/disable; external cancellation metadata is reconciled at capture boundaries. See [provider details](docs/plugin-providers.md#magicspells-scheduler-capture).
 

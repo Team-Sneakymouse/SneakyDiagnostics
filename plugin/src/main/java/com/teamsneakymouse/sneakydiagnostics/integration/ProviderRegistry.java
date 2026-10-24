@@ -35,11 +35,17 @@ public final class ProviderRegistry implements Diagnostics, AutoCloseable {
 
     public List<String> providers() { checkThread.run(); return List.copyOf(providers.keySet()); }
 
-    public void start(Capture capture) {
+    public void start(Capture capture) { start(capture, List.of()); }
+
+    /** Starts only the named providers (exact registered names); an empty selection starts all of them. */
+    public void start(Capture capture, List<String> selection) {
         checkThread.run();
         if (closed || runs != null) throw new IllegalStateException("Plugin probes are unavailable or already recording");
+        for (String name : selection) {
+            if (!providers.containsKey(name)) throw new IllegalArgumentException("Unknown provider: " + name);
+        }
         // Registrations added during a capture join the next capture only.
-        runs = providers.values().stream().map(Run::new).toList();
+        runs = providers.values().stream().filter(entry -> selection.isEmpty() || selection.contains(entry.plugin)).map(Run::new).toList();
         for (Run run : runs) {
             run.started = true;
             try { run.entry.provider.start(capture); }

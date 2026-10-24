@@ -27,6 +27,31 @@ class ProviderRegistryTest {
         assertEquals(Map.of("rows", List.of(Map.of("calls", 7))), result.getFirst().get("measurements"));
     }
 
+    @Test void selectionStartsAndReportsOnlyNamedProviders() {
+        var first = new Probe();
+        var second = new Probe();
+        var third = new Probe();
+        registry.register("first", "v", "i", first);
+        registry.register("second", "v", "i", second);
+        registry.register("third", "v", "i", third);
+        registry.start(capture, List.of("third", "first"));
+        var result = registry.stop("completed");
+        assertEquals(List.of("first", "third"), result.stream().map(row -> row.get("plugin")).toList());
+        assertNull(second.capture);
+        assertEquals(0, second.stops);
+        assertEquals(1, first.stops);
+        assertEquals(1, third.stops);
+    }
+
+    @Test void unknownSelectionIsRejectedBeforeAnyProviderStarts() {
+        var first = new Probe();
+        registry.register("first", "v", "i", first);
+        assertThrows(IllegalArgumentException.class, () -> registry.start(capture, List.of("first", "missing")));
+        assertNull(first.capture);
+        registry.start(capture); // The failed validation left no run behind.
+        assertSame(capture, first.capture);
+    }
+
     @Test void unloadingFinishesOnlyThatProviderAndKeepsItsPartialResult() {
         var first = new Probe();
         var second = new Probe();
