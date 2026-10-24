@@ -86,10 +86,23 @@ microphone handlers and scheduled delivery.
 
 ## Reports and verification
 
-`plugins-1.json` is written under the normal capture folder. Its `providers` array identifies
-each participating plugin/build/instrumentation version, start status, completion reason,
-coverage and detached measurements. No registered providers means no plugin measurements.
-It does not imply zero plugin cost. `/diagnostics plugins status` lists registered probes.
+`plugins-1.json` is written under the normal capture folder as an index. Its `providers` array
+identifies each participating plugin/build/instrumentation version, start status, completion
+reason, per-provider coverage (`complete`), any error, and the `file` holding its measurements.
+`incompleteProviders` lists providers with partial coverage or an error; they do not by
+themselves make the collector `complete` false, which means only that the capture ended as
+`completed` and no provider failed to start or stop. `selected` is `"all"` or the chosen names.
+Each provider's detached measurements are in `plugins-<provider>-1.json` (lowercased name with
+characters outside `[a-z0-9._-]` replaced by `_`; later collisions get `~2`, `~3`; use the index
+`file` field). That file repeats the standard header with the provider's own `plugin`,
+`pluginVersion`, `instrumentationVersion`, `reason`, `complete` and `error`, and a free-form
+`measurements` object exactly as the provider returned it (omitted if the provider failed).
+No registered providers means no plugin measurements, not zero plugin cost.
+
+Providers participate by default. `/diagnostics plugins start [seconds] [provider ...]` and
+`/diagnostics all start [seconds] [world] [plugins=<a>,<b>]` start only the named providers
+(case-insensitive exact match, at most 32; unknown or duplicate names reject the start).
+`/diagnostics plugins status` lists registered providers. See `docs/report-schema-v2.md`.
 
 Run the consumer/provider classloader check after building the instrumented MagicSpells plugin:
 

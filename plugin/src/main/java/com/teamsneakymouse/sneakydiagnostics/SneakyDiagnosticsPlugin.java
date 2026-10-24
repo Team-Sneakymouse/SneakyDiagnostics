@@ -90,7 +90,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                                 + " seconds; " + parsed.targets().size() + " targets numbered in supplied order. Everyone else remains the comparison baseline.");
                         break;
                     }
-                    var parsed = CaptureArguments.start(name, options);
+                    var parsed = CaptureArguments.start(name, options, providers.providers());
                     List<World> worlds = Bukkit.getWorlds();
                     if (parsed.world() != null) {
                         World world = Bukkit.getWorld(parsed.world());
@@ -98,8 +98,14 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                         worlds = List.of(world);
                     }
                     CaptureContext context = CaptureContext.create(parsed.seconds());
-                    coordinator.start(selected, context, worlds, name.equals("all"));
-                    sender.sendMessage("Started " + name + ": " + context.id() + ", " + parsed.seconds() + " seconds. Reports share this capture ID.");
+                    List<World> startWorlds = worlds;
+                    coordinator.start(selected, name.equals("all"), collector -> {
+                        if (collector instanceof PluginCollector pluginCollector) pluginCollector.start(context, startWorlds, parsed.plugins());
+                        else collector.start(context, startWorlds);
+                    });
+                    sender.sendMessage("Started " + name + ": " + context.id() + ", " + parsed.seconds() + " seconds"
+                            + (parsed.plugins().isEmpty() ? "" : "; providers: " + String.join(", ", parsed.plugins()))
+                            + ". Reports share this capture ID.");
                 }
                 case "resume" -> {
                     if (!name.equals("entities")) throw new IllegalArgumentException("Resume is available for entities only");
@@ -137,7 +143,8 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
     }
 
     private static void help(CommandSender sender, String label) {
-        sender.sendMessage("/" + label + " <entities|timeline|scheduler|plugins|spark|connections|all> <start|status|stop>; entities also supports resume.");
+        sender.sendMessage("/" + label + " <entities|timeline|scheduler|plugins|spark|connections|all> <start|status|stop>; entities also supports resume. "
+                + "plugins start [seconds] [provider ...]; all start [seconds] [world] [plugins=<provider>,<provider>].");
     }
 
     @Override public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
@@ -159,10 +166,20 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                 return Bukkit.getOnlinePlayers().stream().map(org.bukkit.entity.Player::getName)
                         .filter(player -> player.toLowerCase(Locale.ROOT).startsWith(prefix)).toList();
             }
+            if (name.equals("plugins")) {
+                var typed = Arrays.asList(args).subList(actionIndex + 1, args.length - 1);
+                return CaptureArguments.completeProviders(providers.providers(), typed, args[args.length - 1]);
+            }
+            if (name.equals("all") && args[args.length - 1].toLowerCase(Locale.ROOT).startsWith("plugins=")) {
+                return CaptureArguments.completePluginsOption(providers.providers(), args[args.length - 1]);
+            }
             if (name.equals("entities") && args.length == actionIndex + 2
-                    || name.equals("all") && args.length == actionIndex + 3) {
+                    || name.equals("all") && args.length >= actionIndex + 2 && args.length <= actionIndex + 3) {
                 String prefix = args[args.length - 1];
-                return Bukkit.getWorlds().stream().map(World::getName).filter(world -> world.startsWith(prefix)).toList();
+                var matches = new java.util.ArrayList<>(Bukkit.getWorlds().stream().map(World::getName).filter(world -> world.startsWith(prefix)).toList());
+                if (name.equals("all") && "plugins=".startsWith(prefix.toLowerCase(Locale.ROOT))
+                        && Arrays.stream(args).noneMatch(arg -> arg.toLowerCase(Locale.ROOT).startsWith("plugins="))) matches.add("plugins=");
+                return matches;
             }
         }
         return List.of();
