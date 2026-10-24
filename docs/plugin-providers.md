@@ -185,12 +185,19 @@ These snippets and the shim are compiled by the SneakyDiagnostics tests
 2. **Guard string building.** When no capture runs `start()` returns 0 and `end/count/level` return at once, but
    `"machine." + type` would still allocate. Build a name only after the token check
    (`if (t != 0) probe.end("machine." + type, t);`), and build level names inside `if (probe.sampleDue())`.
-   A counter with a built name goes in `if (probe.on())`. Constant names need no guard.
+   A counter with a built name goes in `if (probe.on())`. Constant names need no guard. With SneakyDiagnostics
+   installed, `on()` and `sampleDue()` are one interface call each even when idle: cheap, but call them once per
+   tick or loop, not once per entity.
 3. **Nest sections strictly (LIFO).** End an inner section before its outer one, and never overlap two sections
    that are not nested. `selfNanos` (time not spent in nested sections) is exact only then; `nestingErrors` in
-   the report counts violations and must be 0. Do not nest a section inside one with the same name.
+   the report counts violations and must be 0. Do not nest a section inside one with the same name. **Give every
+   section its own token variable**: reusing one (`long ts = t0; ... probe.end("a", ts); ... probe.end("tick", t0);`
+   with `ts` and `t0` holding the same token) makes the later `end` an unknown token and the outer section is lost.
 4. **`try/finally` around early returns.** Every `start()` must reach its `end()` on every path, including
    `return`, `continue`, `break` and exceptions. When unsure, wrap the work in `try { ... } finally { probe.end(...); }`.
+   For a tick method with many sequential sections, put the whole body in one `try/finally` that ends the outer
+   `tick` section: if an inner section throws, the outer `end` closes the frames left open (each counted in
+   `nestingErrors`) instead of leaking them.
 5. **Server thread only.** The probe is not thread safe. Never call it from async tasks, other threads or
    packet/voice threads; count such work on the server thread when it is delivered.
 6. **Naming conventions.**
@@ -208,7 +215,10 @@ These snippets and the shim are compiled by the SneakyDiagnostics tests
 7. **Entity ownership levels.** If your plugin owns entities (displays, armor stands, NPCs, mobs it spawns),
    report them as levels, inside `sampleDue()`: `entities.owned` (total) and
    `entities.owned.<bukkit entity type, lowercase>` (for example `entities.owned.item_display`). Counts per
-   type only: no per-chunk or per-entity data. See `report-schema-v2.md`.
+   type only: no per-chunk or per-entity data. See `report-schema-v2.md`. Count only what the plugin already keeps
+   in memory. A plugin that stores entity UUIDs rather than references may resolve them with `Bukkit.getEntity`
+   inside `sampleDue()` (this counts only loaded entities); never scan worlds or load chunks. Leave out entities
+   you cannot count cheaply and say so in your README.
 8. **Instrumentation version.** `<plugin>-ticks-<n>` (lowercase plugin name). Increase `n` whenever what a report
    means changes: a name is added, removed or renamed, a section is moved to another place in the nesting, a
    level starts counting something else. Never reuse a number for a different meaning. A new plugin release with
@@ -216,6 +226,10 @@ These snippets and the shim are compiled by the SneakyDiagnostics tests
    captures only within one instrumentation version.
 9. **Keep it cheap.** One section per meaningful piece (a tick, a phase, a handler, a kind of work), not per
    entity or per block.
+10. **One `sampleDue()` site per plugin.** The recorder hands each second's sampling slot to whichever call asks
+    first, so two scheduled tasks that both call `sampleDue()` make each other skip levels. Sample every level
+    from a single place (for example one `sampleLevels()` method called from the main tick) and let other tasks
+    contribute only sections and counts.
 
 ## 3. Migrating from a copied Probe
 
@@ -225,10 +239,12 @@ SneakyHeist). Call sites such as `probe.start()`, `probe.end("x", t)`, `probe.co
 and `probe.level("x", n)` keep working unchanged, because the shim has the same method names.
 
 1. **Bump the API dependency** in `build.gradle.kts`: set the `compileOnly("io.github.team-sneakymouse:SneakyDiagnostics-API:...")`
-   version to the `<version>` the integrator gives you. Keep `softdepend: [SneakyDiagnostics]` in `plugin.yml`.
+   version to the `<version>` the integrator gives you, and update any comment there that still names
+   `DiagnosticsBridge`. Keep `softdepend: [SneakyDiagnostics]` in `plugin.yml`.
 2. **Delete** `integration/Probe.java` and `integration/DiagnosticsBridge.java`.
 3. **Add the shim** from [Quick start](#1-quick-start) as `integration/Probe.java` (same class name and package as
-   the deleted file, so existing imports still resolve; only the `package` line differs between plugins).
+   the deleted file, so existing imports still resolve; only the `package` line differs between plugins). Match
+   the repository's line endings (the reference file is CRLF; with `* text=auto` git normalizes either way).
 4. **Replace the hook code in the main class.** Remove the `AutoCloseable diagnostics` field, `hookDiagnostics()` and
    `unhookDiagnostics()`. Change the probe field to `new Probe(this, "<plugin>-ticks-2")` (the old one was
    `new Probe()`), call `probe.hook()` where `hookDiagnostics()` was called (end of `onEnable`) and
@@ -239,7 +255,8 @@ and `probe.level("x", n)` keep working unchanged, because the shim has the same 
      not require this;
    - section names are still fixed labels and fewer than 256 per kind (Rule 1).
 6. **Guard string building.** Find every name that is built, for example with
-   `grep -nE 'probe\.(end|count|level)\(.*\+' -r src`, and guard it as in Rule 2:
+   `grep -nE 'probe(\(\))?\.(end|count|level)\(.*\+' -r src` (the optional `()` also matches
+   `plugin.probe().end(...)`), and guard it as in Rule 2:
 
    ```diff
    -probe.end("placed." + p.getClass().getSimpleName(), ts);
@@ -268,7 +285,7 @@ and `probe.level("x", n)` keep working unchanged, because the shim has the same 
 ## 4. Verification checklist
 
 - [ ] `./gradlew build` passes; the plugin JAR contains no `com/teamsneakymouse/sneakydiagnostics/api` classes.
-- [ ] `grep -nE 'probe\.(end|count|level)\(.*\+' -r src` shows only guarded calls (Rule 2); no `Diagnostics` type
+- [ ] `grep -nE 'probe(\(\))?\.(end|count|level)\(.*\+' -r src` shows only guarded calls (Rule 2); no `Diagnostics` type
       is mentioned anywhere except `integration/Probe.java`.
 - [ ] With SneakyDiagnostics installed, start the server: no warnings about SneakyDiagnostics in the log, and
       `/diagnostics plugins status` lists your plugin.
