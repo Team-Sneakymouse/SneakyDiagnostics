@@ -95,10 +95,10 @@ Each deployable plugin/companion Maven POM includes a custom `sneakyrp.deploymen
 
 | Artifact | Property value | Installation directory |
 | --- | --- | --- |
-| `SneakyDiagnostics` | `paper-plugin` | `plugins/` |
+| `SneakyDiagnostics` | `paper-plugin,velocity-plugin` | `plugins/` on Paper servers and Velocity proxies |
 | `SneakyDiagnostics-Ignite` | `ignite-mod` | Ignite's `mods/` |
 
-Read the version's `.pom` alongside its main JAR and select installation handling by this property. For example, the companion declares `<properties><sneakyrp.deployment.type>ignite-mod</sneakyrp.deployment.type></properties>`. The API library has no deployment property and must not be installed as a plugin. This is a custom deployment convention, not Maven's packaging type; both artifacts remain JARs. The property is in the POM, not repository-level `maven-metadata.xml` or Gradle's `.module` file. Existing releases lack it; deployment systems can retain their legacy behavior for missing values and should reject unknown explicit values.
+The value is a comma-separated list of the platforms the JAR runs on; the plugin JAR runs on both Paper and Velocity. Read the version's `.pom` alongside its main JAR and select installation handling by this property and the target server. For example, the companion declares `<properties><sneakyrp.deployment.type>ignite-mod</sneakyrp.deployment.type></properties>`. The API library has no deployment property and must not be installed as a plugin. This is a custom deployment convention, not Maven's packaging type; both artifacts remain JARs. The property is in the POM, not repository-level `maven-metadata.xml` or Gradle's `.module` file. Existing releases lack it; deployment systems can retain their legacy behavior for missing values and should reject unknown explicit values.
 
 CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have access to `INFISICAL_IDENTITY_ID` and `INFISICAL_DOMAIN` GitHub Actions secrets, and the identity must authorize this repository. Infisical project `lords-of-minecraft`, environment `prod`, path `/Maven` must provide `MAVEN_USERNAME` and `MAVEN_PASSWORD`.
 

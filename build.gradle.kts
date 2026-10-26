@@ -59,7 +59,7 @@ subprojects {
                         else -> "Optional Ignite instrumentation companion for SneakyDiagnostics"
                     })
                     url.set("https://github.com/Team-Sneakymouse/SneakyDiagnostics")
-                    if (project.name != "api") properties.put("sneakyrp.deployment.type", if (project.name == "plugin") "paper-plugin" else "ignite-mod")
+                    if (project.name != "api") properties.put("sneakyrp.deployment.type", if (project.name == "plugin") "paper-plugin,velocity-plugin" else "ignite-mod")
                     scm {
                         url.set("https://github.com/Team-Sneakymouse/SneakyDiagnostics")
                         connection.set("scm:git:git@github.com:Team-Sneakymouse/SneakyDiagnostics.git")
