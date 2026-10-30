@@ -45,7 +45,9 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
 - **Entity census**: segment-combined counts by type and owner hint, tracked-subscription groups, per-world coverage (unreached worlds are unknown, not zero).
 - **Window correlation**: the worst timeline windows (max tick at or above `--slow-ms`, default 100; `--top-windows`, default 10), and for each the provider
   sections active in that window (from `series`, with a multiple of that section's median window), the scheduler snapshots that fell in it with the largest
-  pending changes and the snapshot's own cost. It also lists sections that are busier in slow windows than in other windows. A provider
+  pending changes and the snapshot's own cost. For probes with count/level series it also shows what the provider counted in that second
+  and its sampled levels against their median (a level with no sample in that second is left out, not shown as zero).
+  It also lists sections that are busier in slow windows than in other windows. A provider
   with no series gets an explicit "cannot be attributed" statement. Ignite groups are aggregates, so they cannot be attributed to a window and the report says so.
 - **Leads**: hypotheses derived from the numbers, kept apart from the observations above them.
 

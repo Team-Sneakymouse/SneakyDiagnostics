@@ -230,7 +230,9 @@ These snippets and the shim are compiled by the SneakyDiagnostics tests
 10. **One `sampleDue()` site per plugin.** The recorder hands each second's sampling slot to whichever call asks
     first, so two scheduled tasks that both call `sampleDue()` make each other skip levels. Sample every level
     from a single place (for example one `sampleLevels()` method called from the main tick) and let other tasks
-    contribute only sections and counts.
+    contribute only sections and counts. The slot is one per series second, so each level gets one point per
+    second in the report's level series; a level you skip in a slot (say a per-type level whose count is 0) shows
+    as "no sample" for that second, so report zeros you can count cheaply instead of leaving them out.
 
 ## 3. Migrating from a copied Probe
 

@@ -167,8 +167,17 @@ def _probe(pr: dict[str, Any]) -> list[str]:
     if pr["ownedEntities"]:
         o.append("  entities owned by this provider (per-type counts; candidates, not tick cost): see levels "
                  "'entities.owned*' above")
+    ks = pr.get("keySeries")
+    has_keys = bool(ks and (ks["counts"] or ks["levels"]))
     o.append("  series: " + (f"{len(pr['seriesSections'])} sections at {pr['seriesWindowMillis']} ms windows"
-                             if pr["hasSeries"] else "NONE - cannot be correlated with timeline windows"))
+                             if pr["hasSeries"] else
+                             "no section series (only counts/levels can be matched to timeline windows)" if has_keys else
+                             "NONE - cannot be correlated with timeline windows"))
+    if ks is not None:
+        left = ks["omitted"]["counts"] + ks["omitted"]["levels"]
+        o.append(f"  count/level series: {len(ks['counts'])} counts, {len(ks['levels'])} levels"
+                 + (f"; left out for the report budget ({len(left)}): {', '.join(left[:10])}"
+                    + (", ..." if len(left) > 10 else "") if left else ""))
     return o
 
 
@@ -298,6 +307,15 @@ def _correlation(c: dict[str, Any]) -> list[str]:
                 o += table(p["sections"], [("section", "section"), ("calls", "calls"), ("inclusiveMs", "incl. ms"),
                                            ("pctOfWindowTickTime", "% of tick time"), ("medianWindowMs", "median win ms"),
                                            ("xMedian", "x median")], "      ")
+            if p.get("counts") is not None:
+                o.append("      counts this second: " + (", ".join(
+                    f"{c['count']}={_fmt(c['n'])} (in {c['windowsWithCount']} windows)" for c in p["counts"]) or "none"))
+            if p.get("levels"):
+                o.append("      levels this second: " + ", ".join(
+                    f"{lv['level']}={_fmt(lv['value'])} (median {_fmt(lv['medianSample'])})" for lv in p["levels"]))
+            om = p.get("omittedKeySeries") or {}
+            if om.get("counts") or om.get("levels"):
+                o.append(f"      no series (report budget): {len(om.get('counts', []))} counts, {len(om.get('levels', []))} levels")
         sc = w["scheduler"]
         if sc.get("note"):
             o.append("    scheduler: " + sc["note"])

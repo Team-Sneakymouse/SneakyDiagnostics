@@ -70,7 +70,7 @@ def entities(schema: int, count: int = 4) -> dict[str, Any]:
 
 
 def probe(sections: dict[str, tuple[int, float, float]], *, series: bool = True, omitted: int = 0,
-          levels: dict[str, Any] | None = None) -> dict[str, Any]:
+          levels: dict[str, Any] | None = None, key_series: bool = True) -> dict[str, Any]:
     """sections: name -> (calls, self_ms, total_ms)."""
     rows = []
     for name, (calls, self_ms, total_ms) in sections.items():
@@ -92,6 +92,11 @@ def probe(sections: dict[str, tuple[int, float, float]], *, series: bool = True,
         # the first (busiest) section spikes in window 2 (the slow timeline window)
         m["series"] = {"windowMillis": 1000, "sections": {
             rows[0]["name"]: {"calls": [10, 10, 60, 10, 10], "nanos": [1_000_000, 1_000_000, 90_000_000, 1_000_000, 1_000_000]}}}
+        if key_series:
+            # energy arrives in windows 0 and 2; "placed" is 3 for two windows, 5 in the slow window 2, unsampled in 3
+            m["series"]["counts"] = {"energy.arrived": {"windows": [0, 2], "n": [2, 5]}}
+            m["series"]["levels"] = {"placed": {"from": [0, 2, 4], "to": [1, 2, 4], "values": [3, 5, 3]}}
+            m["series"]["omitted"] = {"counts": [], "levels": ["entities.owned"]}
     return m
 
 

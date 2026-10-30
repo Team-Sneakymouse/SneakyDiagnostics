@@ -4,13 +4,15 @@ from __future__ import annotations
 from typing import Any
 
 from .loader import Capture
-from .providers import median, series_windows
+from .providers import key_series, level_at, level_median, median, series_windows
 from .util import ms, num, pct
 
 NOTE = ("Observations only. A section that is busy in a slow window may be a cause, a symptom, or unrelated. "
         "Section times are INCLUSIVE per section and overlap their parents/children, so they are not additive and "
         "can exceed the window's tick time. Only the 16 busiest sections per provider have a series; a section "
-        "missing from a window's list is unknown, not zero.")
+        "missing from a window's list is unknown, not zero. Counts and levels in a window are what the provider "
+        "counted or sampled in that second; a level with no sample there is left out (unknown), and keys named as "
+        "omitted had no room in the report.")
 
 
 def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str, Any] | None, opts: Any) -> dict[str, Any]:
@@ -79,7 +81,8 @@ def _window(w: dict[str, Any], probes: list[Any], snaps: list[dict[str, Any]], s
             "plugin": p.plugin, "windowMillis": wm,
             "alignedWithTimeline": wm == 1000,
             "sections": rows[:6], "sectionsWithSeries": len(secs),
-            "note": "no series data for this window index" if not rows else None})
+            "note": "no section series data for this window index" if not rows else None,
+            **_keys_in_window(p.measurements, idx)})
     near = [s for s in snaps if s.get("observedAfterMillis") is not None
             and w["fromMillis"] <= s["observedAfterMillis"] < w["fromMillis"] + 1000]
     sched: dict[str, Any] = {"snapshotsInWindow": len(near), "snapshots": []}
@@ -97,6 +100,25 @@ def _window(w: dict[str, Any], probes: list[Any], snaps: list[dict[str, Any]], s
         sched["note"] = "no scheduler report in this capture"
     entry["scheduler"] = sched
     return entry
+
+
+def _keys_in_window(m: dict[str, Any], idx: int) -> dict[str, Any]:
+    """The provider's counts in the window and its levels there against their usual value (None: no count/level series)."""
+    ks = key_series(m)
+    if ks is None:
+        return {"counts": None, "levels": None}
+    counts = sorted(({"count": k, "n": w[idx], "windowsWithCount": len(w)} for k, w in ks["counts"].items() if idx in w),
+                    key=lambda r: r["n"], reverse=True)
+    levels = []
+    for k, runs in ks["levels"].items():
+        value = level_at(runs, idx)
+        if value is None:
+            continue
+        med = level_median(runs)
+        levels.append({"level": k, "value": value, "medianSample": med,
+                       "xMedian": round(value / med, 2) if med else None})
+    levels.sort(key=lambda r: abs(r["value"] - r["medianSample"]) / (abs(r["medianSample"]) or 1), reverse=True)
+    return {"counts": counts[:8], "levels": levels[:6], "omittedKeySeries": ks["omitted"]}
 
 
 def _previous(snaps: list[dict[str, Any]], s: dict[str, Any]) -> dict[str, Any] | None:

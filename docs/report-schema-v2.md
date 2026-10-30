@@ -84,7 +84,10 @@ shared probe emit this shape:
   "slowest": [ { "section": "tick.watching", "nanos": 0, "atMillis": 0, "atTick": 0 } ],
   "counts": { "energy.arrived": 0 },
   "levels": { "placed": { "samples": 0, "mean": 0.0, "min": 0, "max": 0, "last": 0 } },
-  "series": { "windowMillis": 1000, "sections": { "tick": { "calls": [0], "nanos": [0] } } },
+  "series": { "windowMillis": 1000, "sections": { "tick": { "calls": [0], "nanos": [0] } },
+              "counts": { "energy.arrived": { "windows": [0, 7], "n": [3, 1] } },
+              "levels": { "placed": { "from": [0, 5], "to": [3, 9], "values": [4, 6] } },
+              "omitted": { "counts": [], "levels": [] } },
   "nestingErrors": 0, "omittedKeys": 0, "maxKeys": 256
 }
 ```
@@ -102,6 +105,18 @@ shared probe emit this shape:
   timeline report's one-second windows. Only the 16 sections with the largest `totalNanos` are
   included; `calls[i]` and `nanos[i]` are for window `i` (a call belongs to the window in which it ends;
   `nanos` is inclusive wall time, like `totalNanos`). Windows with no calls are `0`.
+- **Count and level series** (same windows; added later in `probe/1`, so older reports have no `series.counts`,
+  `series.levels` or `series.omitted`, and readers treat their absence as "no series", not as zero):
+  - `counts.<key>` lists only the windows with a non-zero count: `windows[i]` is a window index and `n[i]` what was
+    counted in it. A window not listed counted 0 for that key.
+  - `levels.<key>` lists runs of consecutive sampled windows with the same value: windows `from[i]` to `to[i]`
+    (inclusive) each had `values[i]` as their last sample. `sampleDue()` is due once per window, so a window in no run
+    had **no sample** (the plugin skipped the key, or the server didn't tick in that second): unknown, not zero.
+  - Budget: the count and level series together use at most 50,000 values (2 per listed count window, 3 per
+    level run). Keys are taken cheapest first, so rare markers (`hunt.started`) always fit and only the busiest
+    keys are left out; their names are in `omitted.counts` / `omitted.levels`. Every key in `counts` / `levels`
+    is in exactly one of the series map and the omitted list. Leaving a key out does not make the provider
+    incomplete.
 - **Bounds:** at most 256 distinct names per map; extra names add to `omittedKeys` and make the
   provider incomplete. Labels are fixed strings (kinds, spells, machine types), never player
   names, ids or text. Values must satisfy the existing 250,000-value / 16-level report limit.

@@ -108,8 +108,12 @@ def analyze_probe(m: dict[str, Any], n: int) -> dict[str, Any]:
         "hasSeries": bool(series and isinstance(series.get("sections"), dict) and series["sections"]),
         "seriesWindowMillis": series.get("windowMillis") if series else None,
         "seriesSections": sorted(series["sections"]) if series and isinstance(series.get("sections"), dict) else [],
+        "keySeries": None,
         "consistencyProblems": problems, "timingNote": TIMING_NOTE,
     }
+    ks = key_series(m)
+    if ks is not None:
+        result["keySeries"] = {"counts": sorted(ks["counts"]), "levels": sorted(ks["levels"]), "omitted": ks["omitted"]}
     return result
 
 
@@ -254,6 +258,70 @@ def series_windows(m: dict[str, Any]) -> tuple[int, dict[str, dict[str, list[flo
         if isinstance(d, dict) and isinstance(d.get("nanos"), list) and isinstance(d.get("calls"), list):
             secs[name] = {"calls": d["calls"], "nanos": d["nanos"]}
     return wm, secs
+
+
+# The recorder's hard window clamp: no valid series window index reaches this.
+MAX_SERIES_WINDOWS = 3600
+
+
+def _window_index(v: Any) -> int | None:
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v < MAX_SERIES_WINDOWS else None
+
+
+def key_series(m: dict[str, Any]) -> dict[str, Any] | None:
+    """Count and level series (added to probe/1 later; None for reports without them).
+
+    counts: name -> {window: n} (windows with a non-zero count); levels: name -> [(from, to, value)] runs of sampled
+    windows (a window in no run had no sample: unknown, not zero); omitted: names left out for the value budget.
+    Malformed entries (non-integer or out-of-range windows, non-numeric values) are dropped, never expanded.
+    """
+    s = m.get("series")
+    if not isinstance(s, dict) or not isinstance(s.get("counts"), dict) or not isinstance(s.get("levels"), dict):
+        return None
+    counts: dict[str, dict[int, float]] = {}
+    for name, d in s["counts"].items():
+        if isinstance(d, dict) and isinstance(d.get("windows"), list) and isinstance(d.get("n"), list):
+            counts[name] = {w: num(n) for w, n in ((_window_index(w), n) for w, n in zip(d["windows"], d["n"]))
+                            if w is not None and num(n, None) is not None}
+    levels: dict[str, list[tuple[int, int, float]]] = {}
+    for name, d in s["levels"].items():
+        if isinstance(d, dict) and all(isinstance(d.get(k), list) for k in ("from", "to", "values")):
+            runs = []
+            for a, b, v in zip(d["from"], d["to"], d["values"]):
+                a, b = _window_index(a), _window_index(b)
+                if a is not None and b is not None and a <= b and num(v, None) is not None:
+                    runs.append((a, b, num(v)))
+            levels[name] = runs
+    om = s.get("omitted") if isinstance(s.get("omitted"), dict) else {}
+
+    def names(v: Any) -> list[str]:
+        return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+    return {"counts": counts, "levels": levels,
+            "omitted": {"counts": names(om.get("counts")), "levels": names(om.get("levels"))}}
+
+
+def level_at(runs: list[tuple[int, int, float]], window: int) -> float | None:
+    """The level's sample in the window, or None when it had none."""
+    for a, b, v in runs:
+        if a <= window <= b:
+            return v
+    return None
+
+
+def level_median(runs: list[tuple[int, int, float]]) -> float:
+    """The median over sampled windows (each run weighted by its length)."""
+    ordered = sorted((v, b - a + 1) for a, b, v in runs)
+    total = sum(n for _, n in ordered)
+    if not total:
+        return 0.0
+    def kth(k: int) -> float:
+        for v, n in ordered:
+            if k < n:
+                return v
+            k -= n
+        return ordered[-1][0]
+    return kth(total // 2) if total % 2 else (kth(total // 2 - 1) + kth(total // 2)) / 2
 
 
 def median(xs: list[float]) -> float:

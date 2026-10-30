@@ -120,6 +120,49 @@ def test_correlation_uses_series_and_states_missing_series(tmp_path):
     assert "cannot be attributed" in text and "not additive" in text
 
 
+def test_correlation_shows_counts_and_levels_of_the_slow_window(tmp_path):
+    r = run(fx.v2_capture(tmp_path))
+    alpha = next(p for p in r["correlation"]["windows"][0]["providers"] if p["plugin"] == "Alpha")
+    assert alpha["counts"] == [{"count": "energy.arrived", "n": 5.0, "windowsWithCount": 2}]
+    assert alpha["levels"] == [{"level": "placed", "value": 5.0, "medianSample": 3.0, "xMedian": 1.67}]
+    assert alpha["omittedKeySeries"] == {"counts": [], "levels": ["entities.owned"]}
+    pr = next(p for p in r["providers"] if p["plugin"] == "Alpha")["probe"]
+    assert pr["keySeries"] == {"counts": ["energy.arrived"], "levels": ["placed"],
+                               "omitted": {"counts": [], "levels": ["entities.owned"]}}
+    text = render(r)
+    assert "counts this second: energy.arrived=5" in text and "placed=5 (median 3)" in text
+    assert "left out for the report budget (1): entities.owned" in text
+
+
+def test_reports_without_count_level_series_still_correlate(tmp_path):
+    r = run(fx.v2_capture(tmp_path, probes={"Alpha": fx.probe({"tick": (100, 50.0, 90.0)}, key_series=False)}))
+    alpha = next(p for p in r["correlation"]["windows"][0]["providers"] if p["plugin"] == "Alpha")
+    assert alpha["counts"] is None and alpha["levels"] is None and alpha["sections"]
+    assert next(p for p in r["providers"] if p["plugin"] == "Alpha")["probe"]["keySeries"] is None
+    assert "counts this second" not in render(r)
+
+
+def test_malformed_count_level_series_are_dropped_not_fatal():
+    from sneakydiag.providers import key_series, level_at, level_median
+    ks = key_series({"series": {
+        "counts": {"a": {"windows": [None, "x", -1, 3600, True, 4], "n": [1, 1, 1, 1, 1, 2]}, "b": "junk"},
+        "levels": {"l": {"from": ["bad", 0, 5, 9, 0], "to": [1, 10 ** 12, 4, 9, 2], "values": [1, 7, 7, "x", 3]}},
+        "omitted": {"counts": 1, "levels": ["ok", 2]}}})
+    assert ks["counts"] == {"a": {4: 2}}
+    assert ks["levels"] == {"l": [(0, 2, 3)]}            # huge, reversed, non-numeric and non-integer runs are dropped
+    assert ks["omitted"] == {"counts": [], "levels": ["ok"]}
+    assert level_at([(0, 1, 3), (3, 3, 5)], 2) is None and level_at([(0, 1, 3), (3, 3, 5)], 3) == 5
+    assert level_median([(0, 1, 3), (2, 2, 9)]) == 3 and level_median([(0, 0, 2), (1, 1, 4)]) == 3
+    assert level_median([]) == 0.0
+
+
+def test_probe_with_only_count_level_series_says_so(tmp_path):
+    m = fx.probe({"tick": (1, 1.0, 1.0)})
+    m["series"]["sections"] = {}
+    text = render(run(fx.v2_capture(tmp_path, probes={"Alpha": m})))
+    assert "no section series (only counts/levels" in text and "counts this second: energy.arrived=5" in text
+
+
 def test_correlation_for_v1_freeform_says_no_series(tmp_path):
     c = run(fx.v1_capture(tmp_path))["correlation"]
     assert len(c["providersWithoutSeries"]) == 2 and "free-form" in c["providersWithoutSeries"][0]["why"]

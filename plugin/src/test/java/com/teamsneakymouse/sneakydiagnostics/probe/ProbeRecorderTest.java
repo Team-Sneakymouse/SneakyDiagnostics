@@ -416,6 +416,88 @@ class ProbeRecorderTest {
         assertEquals("sec19", map(list(r.get("sections")).get(0)).get("name"));
     }
 
+    @Test void countSeriesListsOnlyWindowsWithACount() {
+        begin(10);
+        now = BASE + 100 * MS;
+        probe.count("hunt.started");
+        now = BASE + 900 * MS;
+        probe.count("hunt.started", 2);
+        now = BASE + 4 * SEC;
+        probe.count("hunt.started");
+        probe.count("never", 0);
+        now = BASE + 6 * SEC;
+        var r = probe.finish("completed");
+        var counts = map(map(r.get("series")).get("counts"));
+        var hunt = map(counts.get("hunt.started"));
+        assertEquals(List.of(0L, 4L), list(hunt.get("windows")));
+        assertEquals(List.of(3L, 1L), list(hunt.get("n")));
+        assertEquals(4L, map(r.get("counts")).get("hunt.started"));
+        var never = map(counts.get("never"));            // counted, but never non-zero: present and empty, not omitted
+        assertTrue(list(never.get("windows")).isEmpty());
+        assertTrue(list(map(map(r.get("series")).get("omitted")).get("counts")).isEmpty());
+    }
+
+    @Test void levelSeriesIsRunsOfEqualSamplesWithGapsForUnsampledWindows() {
+        begin(10);
+        long[] values = {3, 3, 5, -1, 5, 5, 7};              // -1: not sampled in that window
+        for (int w = 0; w < values.length; w++) {
+            now = BASE + w * SEC + 20 * MS;
+            assertTrue(probe.sampleDue());
+            if (values[w] >= 0) probe.level("players.inside", values[w]);
+        }
+        now = BASE + 6 * SEC + 500 * MS;
+        probe.level("players.inside", 8);                    // a second sample in window 6: the last one counts
+        now = BASE + 8 * SEC;
+        var r = probe.finish("completed");
+        var level = map(map(map(r.get("series")).get("levels")).get("players.inside"));
+        assertEquals(List.of(0L, 2L, 4L, 6L), list(level.get("from")));
+        assertEquals(List.of(1L, 2L, 5L, 6L), list(level.get("to")));
+        assertEquals(List.of(3L, 5L, 5L, 8L), list(level.get("values")));
+        assertEquals(7L, map(map(r.get("levels")).get("players.inside")).get("samples"));
+    }
+
+    @Test void sampleDueIsOncePerWindowEvenWithIrregularTicks() {
+        begin(10);
+        // ticks a bit over 50 ms apart, drifting against the windows: the old "a second since the last sample" rule
+        // skipped a window now and then; one sample per window is what the level series needs
+        int due = 0;
+        var dueWindows = new java.util.TreeSet<Long>();
+        for (long t = 0; t < 9 * SEC; t += 52 * MS + 300_000) {
+            now = BASE + t;
+            if (probe.sampleDue()) {
+                due++;
+                dueWindows.add(t / SEC);
+            }
+        }
+        assertEquals(9, due);
+        assertEquals(9, dueWindows.size());
+    }
+
+    @Test void seriesBudgetTakesCheapKeysFirstAndNamesTheRest() {
+        int seconds = 1800;
+        begin(seconds);
+        for (int w = 0; w < seconds; w++) {
+            now = BASE + w * SEC + 10 * MS;
+            for (int i = 0; i < 30; i++) probe.count(String.format("busy.%02d", i));
+            if (probe.sampleDue()) probe.level("steady", 4);
+            if (w == 77) probe.count("hunt.started");
+        }
+        now = BASE + seconds * SEC;
+        var series = map(probe.finish("completed").get("series"));
+        var counts = map(series.get("counts"));
+        // 2 (the marker) + 3 (one run) leave room for 13 busy counters at 2 x 1800 values each
+        assertTrue(counts.containsKey("hunt.started"));
+        assertTrue(map(series.get("levels")).containsKey("steady"));
+        assertEquals(1 + 13, counts.size());
+        var omitted = list(map(series.get("omitted")).get("counts"));
+        assertEquals(17, omitted.size());
+        assertEquals("busy.13", omitted.get(0));
+        assertTrue(counts.containsKey("busy.12"));
+        int used = 0;
+        for (Object o : counts.values()) used += 2 * list(map(o).get("windows")).size();
+        assertTrue(used <= ProbeRecorder.SERIES_VALUES);
+    }
+
     @Test void keysAreCappedAndOmissionsMakeTheResultIncomplete() {
         begin(10);
         for (int i = 0; i < 256; i++) {
@@ -578,7 +660,11 @@ class ProbeRecorderTest {
         assertEquals(List.of("name", "calls", "totalNanos", "selfNanos", "meanNanos", "maxNanos", "maxAtMillis",
                 "maxAtTick", "p50Nanos", "p95Nanos", "p99Nanos", "histogramLog2"),
                 List.copyOf(section(r, "tick").keySet()));
-        assertEquals(List.of("windowMillis", "sections"), List.copyOf(map(r.get("series")).keySet()));
+        var series = map(r.get("series"));
+        assertEquals(List.of("windowMillis", "sections", "counts", "levels", "omitted"), List.copyOf(series.keySet()));
+        assertEquals(List.of("windows", "n"), List.copyOf(map(map(series.get("counts")).get("energy.arrived")).keySet()));
+        assertEquals(List.of("from", "to", "values"), List.copyOf(map(map(series.get("levels")).get("placed")).keySet()));
+        assertEquals(List.of("counts", "levels"), List.copyOf(map(series.get("omitted")).keySet()));
         assertEquals(3L, section(r, "tick").get("maxAtTick"));
         assertEquals(2000L, r.get("observedMillis"));
         assertTrue(reportValues(r) > 0);
@@ -587,14 +673,12 @@ class ProbeRecorderTest {
     @Test void worstCaseReportStaysUnderTheProviderValueLimit() {
         int seconds = 1800;
         begin(seconds);
-        // 256 sections, each called in every window so every series array is full
+        // 256 sections, counts and levels, each in every window so every series array is full (levels change each window)
         for (int w = 0; w < seconds; w++) {
             now = BASE + w * SEC + 10 * MS;
             for (int i = 0; i < ProbeRecorder.MAX_KEYS; i++) run("section." + i, 100L + i);
-        }
-        for (int i = 0; i < ProbeRecorder.MAX_KEYS; i++) {
-            probe.count("count." + i);
-            probe.level("level." + i, i);
+            for (int i = 0; i < ProbeRecorder.MAX_KEYS; i++) probe.count("count." + i);
+            if (probe.sampleDue()) for (int i = 0; i < ProbeRecorder.MAX_KEYS; i++) probe.level("level." + i, w);
         }
         now = BASE + seconds * SEC + 5 * SEC;
         var r = probe.finish("completed");
@@ -605,8 +689,12 @@ class ProbeRecorderTest {
             assertEquals(seconds, list(map(o).get("calls")).size());
             assertEquals(seconds, list(map(o).get("nanos")).size());
         }
+        var omitted = map(map(r.get("series")).get("omitted"));
+        assertFalse(list(omitted.get("counts")).isEmpty());
+        assertFalse(list(omitted.get("levels")).isEmpty());
         int total = reportValues(r);
         // 256 x (1 map + 11 scalars + 1 list + 41 buckets) + 16 x (1 + 2 x (1 + 1800)) + counts/levels/slowest/header
+        // + the count/level series (at most SERIES_VALUES plus a few per key) + the omitted names
         assertTrue(total < 250_000, "values: " + total);
         assertTrue(total > 70_000, "values: " + total);
         assertTrue(probe.complete());
@@ -622,6 +710,37 @@ class ProbeRecorderTest {
         assertTrue(reportValues(r) < 250_000);
         var any = map(map(map(r.get("series")).get("sections")).values().iterator().next());
         assertEquals(windows, list(any.get("calls")).size());
+    }
+
+    @Test void countsAndLevelsPastTheWindowClampKeepSamplingAndLandInTheLastWindow() {
+        int seconds = ProbeRecorder.MAX_WINDOWS + 3;
+        probe.begin(BASE, seconds, 0);
+        int slots = 0;
+        for (int s = 0; s < seconds; s++) {
+            now = BASE + s * SEC + 10 * MS;
+            if (probe.sampleDue()) {
+                slots++;
+                probe.level("players", s < ProbeRecorder.MAX_WINDOWS ? 2 : 9);
+            }
+            if (s >= ProbeRecorder.MAX_WINDOWS - 1) probe.count("late");
+        }
+        assertEquals(seconds, slots);                       // sampling goes on past the last window
+        now = BASE + seconds * SEC;                           // the deadline
+        assertFalse(probe.sampleDue());
+        probe.count("late");
+        probe.level("players", 100);
+        var r = probe.finish("completed");
+        var series = map(r.get("series"));
+        var late = map(map(series.get("counts")).get("late"));
+        assertEquals(List.of((long) ProbeRecorder.MAX_WINDOWS - 1), list(late.get("windows")));
+        assertEquals(List.of(4L), list(late.get("n")));       // the last real window and the 3 past it, nothing at the deadline
+        var players = map(map(series.get("levels")).get("players"));
+        assertEquals(List.of(0L, (long) ProbeRecorder.MAX_WINDOWS - 1), list(players.get("from")));
+        assertEquals(List.of((long) ProbeRecorder.MAX_WINDOWS - 2, (long) ProbeRecorder.MAX_WINDOWS - 1), list(players.get("to")));
+        assertEquals(List.of(2L, 9L), list(players.get("values")));
+        assertEquals((long) seconds, map(map(r.get("levels")).get("players")).get("samples"));
+        assertTrue(reportValues(r) < 250_000);
+        assertTrue(probe.complete());
     }
 
     @Test void startedZeroNanosStillUsesANonZeroToken() {
