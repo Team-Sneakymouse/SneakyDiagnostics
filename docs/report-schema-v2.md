@@ -6,6 +6,16 @@ report written by this release carries `"schemaVersion": 2` in its header. Tools
 v2 and tell them apart by that field. The layouts of `entities`, `timeline`, `scheduler`,
 `spark` and `connections` reports are unchanged apart from compression.
 
+## Compatibility policy
+
+Compatible additions preserve `schemaVersion`; readers must tolerate unknown fields. Removing fields,
+changing their types, or changing their meanings requires a new schema version. Preserve support for older
+versions explicitly rather than silently interpreting their fields with new semantics.
+
+For report-field changes, update this contract, affected readers (including `tools/sneakydiag/loader.py`),
+and fixtures in `tools/tests` in the same change. Additive fields need reader changes only where the tools
+consume them; document their units, meaning, and missing-data behavior here.
+
 ## Capture folder
 
 ```text

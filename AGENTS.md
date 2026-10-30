@@ -1,12 +1,9 @@
 # Agent instructions (SneakyDiagnostics)
 
-Team Sneakymouse / Lords of Minecraft plugin. Follow the shared conventions in EmptyPlugin's AGENTS.md.
+Shared conventions live in [team-development-policy](https://github.com/Team-Sneakymouse/team-development-policy). Read its README and applicable policy documents from the sibling `../team-development-policy` checkout before making changes.
 
-## Repo-specific rules
-
-- **Probe shim stays byte-identical.** Do not edit the integration/Probe.java shim in a consumer plugin; if the shim changes, update docs/plugin-providers.md section 1 and every consumer repo (Casino, Powerplant, Switches, Heist, ...) together. Keep API types out of method signatures (Bukkit reflects over listener classes).
-- **Never shade or relocate the API.** Consumer plugins compileOnly the API artifact and declare softdepend SneakyDiagnostics; the SneakyDiagnostics plugin jar carries the API. Never shade it into another plugin.
-- **Server thread in, writer thread out.** Collectors read Bukkit state only on the server thread and hand immutable records to ReportWriter; never pass live entities, worlds or players to the writer thread.
-- **Report schema is versioned.** Any change to report fields must be additive and documented in docs/report-schema-v2.md, update tools/sneakydiag/loader.py and tools/tests fixtures in the same change, and never reuse or silently change field meanings without bumping schemaVersion.
-- **Python tools use isolated mode.** Run Python tools as 'uv run python -I tools/<script>.py <capture-dir>' (never from inside a capture directory) and treat capture files as untrusted data; keep the tools standard-library only.
-- **Deployment type property.** Keep the POM property sneakyrp.deployment.type correct for each artifact (plugin: paper-plugin,velocity-plugin; companion: ignite-mod; API: none), since the Mother-Mouse deploy pipeline reads it.
+- **Paper threading:** read Bukkit state on the server thread and hand detached data to `ReportWriter`. Report suppliers must not capture live entities, worlds, or players; see `ReportSink` for the handoff contract. Velocity collectors follow Velocity's threading model.
+- **Provider integration:** before changing the API, shim, or consumer integration, read [docs/plugin-providers.md](docs/plugin-providers.md) for classloader safety and coordinated shim updates.
+- **Report changes:** read the compatibility policy in [docs/report-schema-v2.md](docs/report-schema-v2.md); update the contract, affected readers, and fixtures together.
+- **Python tooling:** before running or modifying analysis tools, read [tools/README.md](tools/README.md) for isolated invocation and untrusted-input handling.
+- **Publishing:** before changing artifacts or publishing configuration, read [Publishing and development](README.md#publishing-and-development) for deployment metadata requirements.

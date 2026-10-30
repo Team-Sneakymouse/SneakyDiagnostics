@@ -3,7 +3,9 @@
 Python scripts that read SneakyDiagnostics capture folders (`plugins/SneakyDiagnostics/reports/<capture-id>/`) and
 print what the maintainers otherwise work out by hand: rankings, window correlation, spark attribution and
 before/after comparisons. Standard library only, no install step. Run them with [uv](https://docs.astral.sh/uv/);
-use `-I` so a capture folder (untrusted data) can never shadow a module:
+use `-I` so a capture folder (untrusted data) can never shadow a module. Run from the repository checkout,
+passing the capture path as an argument rather than changing into a capture directory. Keep analysis-tool
+runtime dependencies standard-library only (pytest is a test dependency):
 
 ```powershell
 uv run python -I tools/analyze_capture.py <capture-dir> [--json out.json] [--raw]

@@ -4,7 +4,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Supplier;
 
-/** Headers are assembled on the server thread; report suppliers contain only detached data. */
+/**
+ * Paper headers and Bukkit snapshots are assembled on the server thread. Report suppliers run on the
+ * writer thread and contain only detached data: no live entities, worlds, or players, and no Bukkit reads.
+ * After handoff, collectors must not mutate data reachable by those suppliers.
+ */
 public interface ReportSink {
     /** One JSON report. A null suffix is the collector's main file; others are named by {@link #fileName}. */
     record ReportFile(String suffix, Supplier<Map<String, Object>> report) {}

@@ -34,7 +34,11 @@ softdepend: [SneakyDiagnostics]
 
 **The shim.** Save this as `integration/Probe.java` in your plugin: put your own `package` line first and copy the
 rest unchanged. It is the only class that touches the API, it contains no timing or aggregation logic, and
-the file is identical in every plugin.
+the file is identical in every plugin except for its package declaration.
+
+When changing the shared shim, update this canonical snippet and coordinate the corresponding updates in
+every consumer repository (including Casino, Powerplant, Switches, and Heist). Keep consumer copies aligned
+with this snippet rather than introducing plugin-specific behavior into the shim.
 
 ```java
 import com.teamsneakymouse.sneakydiagnostics.api.Diagnostics;
