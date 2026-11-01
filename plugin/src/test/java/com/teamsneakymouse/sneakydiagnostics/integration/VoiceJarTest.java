@@ -20,8 +20,8 @@ class VoiceJarTest {
                     java.nio.charset.StandardCharsets.UTF_8).contains("softdepend: [\"SneakyDiagnostics\"]"));
         }
         try (var loader = new URLClassLoader(new java.net.URL[]{jar.toUri().toURL()}, Diagnostics.class.getClassLoader())) {
-            var recorderType = loader.loadClass("ca.bungo.sneakyconfigurablevoice.diagnostics.VoiceRecorder");
-            var probeType = loader.loadClass("ca.bungo.sneakyconfigurablevoice.diagnostics.VoiceProbe");
+            var recorderType = loader.loadClass("ca.bungo.sneakyvoicechat.diagnostics.VoiceRecorder");
+            var probeType = loader.loadClass("ca.bungo.sneakyvoicechat.diagnostics.VoiceProbe");
             var modeType = loader.loadClass(recorderType.getName() + "$Mode");
             var queueType = loader.loadClass(recorderType.getName() + "$QueuedWork");
             assertSame(loader, recorderType.getClassLoader());
@@ -29,7 +29,7 @@ class VoiceJarTest {
             var recorder = recorderType.getConstructor().newInstance();
             var provider = (Diagnostics.Provider) probeType.getConstructor(recorderType).newInstance(recorder);
             var registry = new ProviderRegistry(() -> {}, () -> 0);
-            var registration = registry.register("SneakyConfigurableVoice", "rebuilt", "voice-routing-1", provider);
+            var registration = registry.register("SneakyVoiceChat", "rebuilt", "voice-routing-1", provider);
             registry.start(new Diagnostics.Capture("shared", "now", System.nanoTime(), 5, 60));
             Object mode = modeType.getEnumConstants()[0];
             Object queued;

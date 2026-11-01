@@ -21,7 +21,7 @@ def test_v1_embedded_providers_normalize_the_same_way(tmp_path):
     cap = load_capture(fx.v1_capture(tmp_path))
     assert cap.schema_version == 1 and cap.manifest is None
     assert cap.warnings == []
-    assert [p.plugin for p in cap.providers] == ["MagicSpells", "SneakyConfigurableVoice"]
+    assert [p.plugin for p in cap.providers] == ["MagicSpells", "SneakyVoiceChat"]
     assert all(p.measurements is not None and not p.is_probe for p in cap.providers)
     assert all(f.status == "unverified" for f in cap.files)
 

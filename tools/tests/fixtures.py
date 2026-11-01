@@ -145,7 +145,7 @@ def v1_capture(root: Path, name: str = "v1", *, providers: list[dict[str, Any]] 
     provs = providers if providers is not None else [
         {"plugin": "MagicSpells", "pluginVersion": "1", "instrumentationVersion": "magicspells-execution-2",
          "started": True, "reason": "completed", "complete": False, "measurements": magicspells()},
-        {"plugin": "SneakyConfigurableVoice", "pluginVersion": "1", "instrumentationVersion": "voice-routing-1",
+        {"plugin": "SneakyVoiceChat", "pluginVersion": "1", "instrumentationVersion": "voice-routing-1",
          "started": True, "reason": "completed", "complete": False, "measurements": freeform_voice()}]
     write_json(d / "plugins-1.json", {**header("plugins", 1), "providers": provs, "complete": False, "notes": "x"})
     return d

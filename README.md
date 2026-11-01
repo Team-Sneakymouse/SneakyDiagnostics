@@ -212,7 +212,7 @@ Install both rebuilt plugin JARs for this integration. The baseline MagicSpells 
 
 See [the provider guide](docs/plugin-providers.md) for the reusable interface, build dependency, lifecycle contract and classloader verification.
 
-The instrumented SneakyConfigurableVoice build registers a `voice-routing-1` provider with the same commands. Its four fixed groups cover normal, whisper, shout and broadcast. Measurements include microphone-event volume, handler/dispatch/query wall time, submission-to-start delay, effective ranges, player-query candidates/matches, recipient/send counts and unstarted/in-flight work at the capture boundary. Collection is thread-safe, bounded and omits player identities and audio payloads. Dispatches scheduled before capture are counted without fabricating queue delay. Timings overlap and send calls returning normally do not prove network delivery. See the voice checkout's README for detailed field meanings and a live smoke checklist.
+The instrumented SneakyVoiceChat build registers a `voice-routing-1` provider with the same commands. Its four fixed groups cover normal, whisper, shout and broadcast. Measurements include microphone-event volume, handler/dispatch/query wall time, submission-to-start delay, effective ranges, player-query candidates/matches, recipient/send counts and unstarted/in-flight work at the capture boundary. Collection is thread-safe, bounded and omits player identities and audio payloads. Dispatches scheduled before capture are counted without fabricating queue delay. Timings overlap and send calls returning normally do not prove network delivery. See the voice checkout's README for detailed field meanings and a live smoke checklist.
 
 ## Deeper probes
 

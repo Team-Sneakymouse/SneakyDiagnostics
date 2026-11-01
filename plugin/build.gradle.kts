@@ -29,7 +29,7 @@ tasks.register<Test>("verifyMagicSpells") {
 }
 
 tasks.register<Test>("verifyVoice") {
-    description = "Verifies the rebuilt SneakyConfigurableVoice provider in a separate classloader."
+    description = "Verifies the rebuilt SneakyVoiceChat provider in a separate classloader."
     group = "verification"
     testClassesDirs = sourceSets.test.get().output.classesDirs
     classpath = sourceSets.test.get().runtimeClasspath
@@ -39,7 +39,7 @@ tasks.register<Test>("verifyVoice") {
         inputs.file(jar)
         systemProperty("voiceJar", jar.get())
     }
-    doFirst { require(jar.isPresent) { "Pass -PvoiceJar=<absolute path to rebuilt SneakyConfigurableVoice JAR>" } }
+    doFirst { require(jar.isPresent) { "Pass -PvoiceJar=<absolute path to rebuilt SneakyVoiceChat JAR>" } }
 }
 
 tasks.processResources {
