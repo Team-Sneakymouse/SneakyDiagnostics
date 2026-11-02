@@ -346,7 +346,7 @@ cannot be expressed that way:
 
 | Use the shared probe when | Use a custom provider when |
 |---|---|
-| everything runs on the server thread | work runs on other threads (SneakyConfigurableVoice records on voice threads; the probe is server-thread only) |
+| everything runs on the server thread | work runs on other threads (SneakyVoiceChat records on voice threads; the probe is server-thread only) |
 | a fixed label set describes the work (`tick.<part>`, `event.<name>`, `<kind>.<type>`) | the data is dimensional or high-cardinality, with exact aggregates that must survive detail overflow (MagicSpells: per spell and operation, plus scheduler task lifecycle) |
 | sections nest strictly | scopes overlap or are unfinished at the capture boundary |
 
@@ -364,7 +364,7 @@ Diagnostics-only reload. Only the contents of `measurements` differ.
    code (for example MagicSpells' mixed-case spell totals) and refuse to rank if the fields they rely on change
    meaning. Changing a custom provider's report means changing the tools in the same step.
 2. **Duplicated lifecycle code:** each custom provider keeps its own copy of the small `DiagnosticsAttachment`
-   class (see MagicSpells `util/performance` and SneakyConfigurableVoice `diagnostics`), as the shim does. A copy per
+   class (see MagicSpells `util/performance` and SneakyVoiceChat `diagnostics`), as the shim does. A copy per
    plugin is required so the API class is never loaded when SneakyDiagnostics is absent; a change to the pattern
    must be applied in every copy.
 3. **One provider per plugin name:** a plugin cannot use the shared probe for a few coarse sections alongside its
@@ -373,12 +373,12 @@ Diagnostics-only reload. Only the contents of `measurements` differ.
 
 ## Custom providers (v1 API)
 
-Use this only when the shared probe does not fit (see above). MagicSpells and SneakyConfigurableVoice do. The API's
+Use this only when the shared probe does not fit (see above). MagicSpells and SneakyVoiceChat do. The API's
 `Diagnostics.register` stays supported unchanged; the report is the provider's own free-form `measurements`. The
 same optional-dependency rules apply: keep the API-dependent adapter in a separate class that is loaded only when
 SneakyDiagnostics' service exists, and register again whenever the `Diagnostics` service reappears
 (`ServiceRegisterEvent`/`ServiceUnregisterEvent`, matched by class name). Copy the `DiagnosticsAttachment` class
-from MagicSpells or SneakyConfigurableVoice for that; it takes a registrar that registers and returns the action
+from MagicSpells or SneakyVoiceChat for that; it takes a registrar that registers and returns the action
 that unregisters.
 
 ```java v1-sketch
@@ -462,10 +462,10 @@ class identity, checks that MagicSpells did not shade the API, and preserves a p
 when the provider unregisters. It starts no Minecraft server. An isolated Paper smoke test
 is still needed for plugin loading, commands, real spell activity and overhead measurements.
 
-For the rebuilt SneakyConfigurableVoice JAR, use the corresponding check:
+For the rebuilt SneakyVoiceChat JAR, use the corresponding check:
 
 ```powershell
-.\gradlew.bat :plugin:verifyVoice -PvoiceJar=D:/Projects/SneakyConfigurableVoice/build/libs/SneakyConfigurableVoice-<version>.jar
+.\gradlew.bat :plugin:verifyVoice -PvoiceJar=D:/Projects/SneakyVoiceChat/build/libs/SneakyVoiceChat-<version>.jar
 ```
 
 It exercises the actual voice recorder/provider through the same service and checks the
