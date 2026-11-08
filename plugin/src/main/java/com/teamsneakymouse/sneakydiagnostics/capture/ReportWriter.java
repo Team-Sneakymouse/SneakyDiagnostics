@@ -26,6 +26,8 @@ public final class ReportWriter implements ReportSink, AutoCloseable {
     private final JavaPlugin plugin;
     private final Set<String> pending = ConcurrentHashMap.newKeySet();
     private final Map<String, Integer> pendingCaptures = new ConcurrentHashMap<>();
+    private final Set<String> finishedCaptures = ConcurrentHashMap.newKeySet();
+    private final Map<String, Runnable> listeners = new ConcurrentHashMap<>();
     private final ReportStore store;
     private final ExecutorService worker = Executors.newSingleThreadExecutor(r -> {
         Thread thread = new Thread(r, "SneakyDiagnostics-reports");
@@ -150,6 +152,7 @@ public final class ReportWriter implements ReportSink, AutoCloseable {
                     Arrays.stream(Bukkit.getPluginManager().getPlugins()).filter(Plugin::isEnabled)
                             .map(p -> new CaptureManifest.Plugin(p.getName(), p.getPluginMeta().getVersion())).toList());
             var atEnd = context.progress().finish(collector) ? CaptureContext.sampleWorkload() : null;
+            if (atEnd != null) finishedCaptures.add(context.id());
             return new ReportStore.Capture(context.id(), context.startedAt(), context.seconds(), server, context.atStart(), atEnd);
         } catch (RuntimeException e) {
             release(collector, context);
@@ -157,9 +160,26 @@ public final class ReportWriter implements ReportSink, AutoCloseable {
         }
     }
 
+    /**
+     * Server thread: runs {@code callback} on the server thread once every collector of this capture has finished and
+     * all its reports are on disk. Registering after that point never fires.
+     */
+    public void onCaptureWritten(String captureId, Runnable callback) {
+        listeners.put(captureId, callback);
+    }
+
     private void release(String collector, CaptureContext context) {
-        pendingCaptures.computeIfPresent(context.id(), (id, count) -> count > 1 ? count - 1 : null);
+        boolean[] drained = {false};
+        pendingCaptures.computeIfPresent(context.id(), (id, count) -> {
+            if (count > 1) return count - 1;
+            drained[0] = true;
+            return null;
+        });
         pending.remove(collector);
+        if (drained[0] && finishedCaptures.remove(context.id())) {
+            Runnable callback = listeners.remove(context.id());
+            if (callback != null && plugin.isEnabled()) plugin.getServer().getScheduler().runTask(plugin, callback);
+        }
     }
 
     @Override public void close() { worker.shutdown(); }

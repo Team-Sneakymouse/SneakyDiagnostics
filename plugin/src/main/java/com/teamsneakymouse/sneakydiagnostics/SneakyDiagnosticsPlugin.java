@@ -24,6 +24,10 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.logging.Level;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.command.Command;
@@ -91,7 +95,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                         var context = CaptureContext.create(parsed.seconds());
                         coordinator.start(selected, context, false, collector -> ((ConnectionCollector) collector)
                                 .start(context, List.of(), parsed.targets()));
-                        sender.sendMessage("Started connections: " + context.id() + ", " + parsed.seconds()
+                        announce(sender, "Started connections: ", context.id(), ", " + parsed.seconds()
                                 + " seconds; " + parsed.targets().size() + " targets numbered in supplied order. Everyone else remains the comparison baseline.");
                         break;
                     }
@@ -108,7 +112,7 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
                         if (collector instanceof PluginCollector pluginCollector) pluginCollector.start(context, startWorlds, parsed.plugins());
                         else collector.start(context, startWorlds);
                     });
-                    sender.sendMessage("Started " + name + ": " + context.id() + ", " + parsed.seconds() + " seconds"
+                    announce(sender, "Started " + name + ": ", context.id(), ", " + parsed.seconds() + " seconds"
                             + (parsed.plugins().isEmpty() ? "" : "; providers: " + String.join(", ", parsed.plugins()))
                             + ". Reports share this capture ID.");
                 }
@@ -137,6 +141,20 @@ public final class SneakyDiagnosticsPlugin extends JavaPlugin {
             sender.sendMessage("Diagnostics command failed; see the server log.");
         }
         return true;
+    }
+
+    /** Sends the start message and arranges a finish message; the capture ID in both copies itself to the clipboard on click. */
+    private void announce(CommandSender sender, String prefix, String id, String suffix) {
+        sender.sendMessage(idMessage(prefix, id, suffix));
+        reports.onCaptureWritten(id, () -> sender.sendMessage(idMessage("Diagnostics finished: ", id, ". All reports are saved.")));
+    }
+
+    private static Component idMessage(String prefix, String id, String suffix) {
+        return Component.text(prefix)
+                .append(Component.text(id, NamedTextColor.AQUA)
+                        .hoverEvent(HoverEvent.showText(Component.text("Click to copy the capture ID")))
+                        .clickEvent(ClickEvent.copyToClipboard(id)))
+                .append(Component.text(suffix));
     }
 
     /** {@code reports list|prune}: runs on the server thread, so busy checks and deletion cannot race a new capture. */
