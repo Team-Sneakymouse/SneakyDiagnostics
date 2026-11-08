@@ -353,6 +353,13 @@ def _normalize_providers(root: Path, cap: Capture, limit: int) -> None:
         if isinstance(raw.get("measurements"), dict):  # v1: embedded
             p.measurements = raw["measurements"]
         elif p.file is not None:  # v2: separate file, index file name is authoritative
+            # Only when the named file is absent: a present but unreadable one stays authoritative.
+            if (p.file.endswith(".json") and p.file + ".gz" in by_file
+                    and not any(f.name == p.file and f.present for f in cap.files)):
+                # Writers before 2026-11 listed the uncompressed name of a provider file stored as .json.gz.
+                cap.warnings.append(f"{p.plugin}: index lists {p.file} but only {p.file}.gz exists; reading "
+                                    f"{p.file}.gz (older writers recorded the uncompressed name)")
+                p.file += ".gz"
             used.add(p.file)
             doc = by_file.get(p.file)
             if doc is not None:

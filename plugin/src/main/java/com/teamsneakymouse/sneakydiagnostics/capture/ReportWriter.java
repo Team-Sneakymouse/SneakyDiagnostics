@@ -104,19 +104,27 @@ public final class ReportWriter implements ReportSink, AutoCloseable {
         });
     }
 
-    @Override public void write(String collector, CaptureContext context, int segment, List<ReportFile> files) {
+    @Override public void write(String collector, CaptureContext context, int segment, List<ReportFile> details, IndexReport index) {
         ReportStore.Capture capture = reserve(collector, context);
         Path dir = store.directory(context.id());
         worker.execute(() -> {
             try {
                 Files.createDirectories(dir);
-                for (ReportFile file : files) {
+                // Details first: compression decides each stored name, and the index must record it.
+                var storedNames = new LinkedHashMap<String, String>();
+                for (ReportFile file : details) {
                     String name = ReportSink.fileName(collector, file.suffix(), segment);
                     try {
-                        save(capture, collector, segment, name, file.report().get());
+                        storedNames.put(file.suffix(), save(capture, collector, segment, name, file.report().get()));
                     } catch (IOException | RuntimeException e) {
                         plugin.getLogger().log(Level.SEVERE, "Cannot save " + dir.resolve(name), e);
                     }
+                }
+                String name = ReportSink.fileName(collector, null, segment);
+                try {
+                    save(capture, collector, segment, name, index.build(storedNames));
+                } catch (IOException | RuntimeException e) {
+                    plugin.getLogger().log(Level.SEVERE, "Cannot save " + dir.resolve(name), e);
                 }
             } catch (IOException | RuntimeException e) {
                 plugin.getLogger().log(Level.SEVERE, "Cannot save reports in " + dir, e);
@@ -126,10 +134,11 @@ public final class ReportWriter implements ReportSink, AutoCloseable {
         });
     }
 
-    /** Compresses when large and updates the manifest after the file is on disk. */
-    private void save(ReportStore.Capture capture, String collector, int segment, String name, Map<String, Object> report) throws IOException {
+    /** Compresses when large and updates the manifest after the file is on disk; returns the stored file name. */
+    private String save(ReportStore.Capture capture, String collector, int segment, String name, Map<String, Object> report) throws IOException {
         Path path = store.writeJson(capture, collector, segment, name, report);
         plugin.getLogger().info("Saved " + path.toAbsolutePath());
+        return path.getFileName().toString();
     }
 
     /** Server thread: marks the collector and capture pending and takes the manifest samples. */

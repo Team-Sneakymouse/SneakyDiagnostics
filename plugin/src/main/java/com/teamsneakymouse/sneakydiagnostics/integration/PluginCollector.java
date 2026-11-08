@@ -57,6 +57,7 @@ public final class PluginCollector implements DiagnosticCollector, Listener {
         boolean normal = reason.equals("completed");
         for (int i = 0; i < results.size(); i++) {
             var row = results.get(i);
+            // Replaced by the stored name (.json.gz when compressed) once the provider file is written.
             String file = ReportSink.fileName(name(), slugs.get(i), 1);
             boolean complete = Boolean.TRUE.equals(row.get("complete"));
             // A provider that failed to start or stop breaks the coordination; merely partial coverage does not.
@@ -82,7 +83,13 @@ public final class PluginCollector implements DiagnosticCollector, Listener {
         index.put("notes", "Only providers registered at capture start participate. World filters do not restrict plugin measurements. "
                 + "Provider timings can overlap scheduler and other provider timings; do not add inclusive totals. "
                 + "No registered providers means no plugin measurements, not zero plugin cost. Provider unload/reload ends that provider's capture early.");
-        files.addFirst(new ReportSink.ReportFile(null, () -> index));
-        reports.write(name(), finished, 1, files);
+        reports.write(name(), finished, 1, files, storedNames -> {
+            // A provider file that failed to write keeps its planned name, so readers report it missing.
+            for (int i = 0; i < entries.size(); i++) {
+                String stored = storedNames.get(slugs.get(i));
+                if (stored != null) entries.get(i).put("file", stored);
+            }
+            return index;
+        });
     }
 }

@@ -49,6 +49,34 @@ def test_missing_listed_file_is_a_warning_and_provider_is_unavailable_not_zero(t
     assert prov.measurements is None and prov.measurements_status == "missing"
 
 
+def test_compressed_provider_file_named_by_the_index_loads(tmp_path):
+    cap = load_capture(fx.v2_capture(tmp_path, gz_providers=("Alpha",)))
+    assert cap.warnings == []
+    (prov,) = cap.providers
+    assert prov.file == "plugins-alpha-1.json.gz" and prov.measurements["sections"]
+
+
+def test_older_index_naming_the_uncompressed_provider_file_still_loads(tmp_path):
+    # Writers before the fix listed plugins-<slug>-1.json although the file was stored as .json.gz.
+    cap = load_capture(fx.v2_capture(tmp_path, gz_providers=("Alpha",), planned_index_names=True))
+    (prov,) = cap.providers
+    assert prov.file == "plugins-alpha-1.json.gz" and prov.measurements["sections"]
+    assert not any("not referenced" in w for w in cap.warnings)
+    assert any("plugins-alpha-1.json.gz" in w and "uncompressed name" in w for w in cap.warnings)
+
+
+def test_unreadable_plain_provider_file_is_not_replaced_by_a_gzip_sibling(tmp_path):
+    d = fx.v2_capture(tmp_path)
+    (d / "plugins-alpha-1.json.gz").write_bytes((d / "plugins-alpha-1.json").read_bytes())
+    (d / "plugins-alpha-1.json").write_text("{not json")
+    (d / "plugins-alpha-1.json.gz").write_bytes(gzip.compress((d / "plugins-alpha-1.json.gz").read_bytes()))
+    cap = load_capture(d)
+    (prov,) = cap.providers
+    assert prov.file == "plugins-alpha-1.json" and prov.measurements is None
+    assert prov.measurements_status == "unreadable"
+    assert any("plugins-alpha-1.json.gz" in w and "not referenced" in w for w in cap.warnings)
+
+
 def test_unlisted_file_and_orphan_provider_file_warn(tmp_path):
     d = fx.v2_capture(tmp_path)
     (d / "plugins-ghost-1.json").write_text(json.dumps(fx.header("plugins", 2, plugin="Ghost")))

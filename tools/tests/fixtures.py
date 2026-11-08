@@ -155,21 +155,27 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
                gz: tuple[str, ...] = ("timeline",), probes: dict[str, dict[str, Any]] | None = None,
                extra_providers: dict[str, dict[str, Any]] | None = None, capture_id: str = CAPTURE_ID,
                provider_complete: bool = True, with_workload: bool = True, instrumentation: str = "alpha-1",
-               failed_providers: tuple[str, ...] = ()) -> Path:
-    """A v2 folder: manifest, index, per-provider files, optionally gzipped reports."""
+               failed_providers: tuple[str, ...] = (), gz_providers: tuple[str, ...] = (),
+               planned_index_names: bool = False) -> Path:
+    """A v2 folder: manifest, index, per-provider files, optionally gzipped reports.
+
+    ``gz_providers`` stores those providers' files compressed. The index names each file as stored, unless
+    ``planned_index_names`` reproduces older writers that listed the uncompressed name.
+    """
     d = root / name
     d.mkdir(parents=True)
     probes = probes if probes is not None else {"Alpha": probe({
         "tick": (100, 40.0, 60.0), "tick.watching": (100, 20.0, 20.0)})}
     files: list[dict[str, Any]] = []
 
-    def add(fname: str, collector: str, doc: dict[str, Any], gzip_it: bool) -> None:
+    def add(fname: str, collector: str, doc: dict[str, Any], gzip_it: bool) -> str:
         p = write_json(d / fname, doc, gzip_it)
         raw = len(json.dumps(doc).encode())
         files.append({"name": p.name, "collector": collector, "segment": 1, "bytes": p.stat().st_size,
                       "uncompressedBytes": raw, "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
                       "complete": bool(doc.get("complete")), "reason": doc.get("reason"),
                       "writtenAt": "2026-01-01T12:00:06Z"})
+        return p.name
 
     cid = {"captureId": capture_id}
     add("timeline-1.json", "timeline", {**timeline(2), **cid}, "timeline" in gz)
@@ -190,10 +196,11 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
             doc["reason"] = "error"
         else:
             doc["measurements"] = meas
-        add(fname, "plugins", doc, False)
+        stored = add(fname, "plugins", doc, plugin in gz_providers)
         entry = {"plugin": plugin, "pluginVersion": "1.0", "instrumentationVersion": instrumentation,
                  "started": not failed, "reason": "error" if failed else "completed",
-                 "complete": provider_complete and not failed, "file": fname, "error": doc.get("error")}
+                 "complete": provider_complete and not failed,
+                 "file": fname if planned_index_names else stored, "error": doc.get("error")}
         index_entries.append(entry)
     index = {**header("plugins", 2, captureId=capture_id), "selected": "all", "providers": index_entries,
              "incompleteProviders": [e["plugin"] for e in index_entries if not e["complete"]],

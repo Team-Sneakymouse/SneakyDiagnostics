@@ -440,10 +440,10 @@ reason, per-provider coverage (`complete`), any error, and the `file` holding it
 themselves make the collector `complete` false, which means only that the capture ended as
 `completed` and no provider failed to start or stop. `selected` is `"all"` or the chosen names.
 Each provider's detached measurements are in `plugins-<provider>-1.json` (lowercased name with
-characters outside `[a-z0-9._-]` replaced by `_`; later collisions get `~2`, `~3`; use the index
-`file` field). That file repeats the standard header with the provider's own `plugin`,
-`pluginVersion`, `instrumentationVersion`, `reason`, `complete` and `error`, and a free-form
-`measurements` object exactly as the provider returned it (omitted if the provider failed).
+characters outside `[a-z0-9._-]` replaced by `_`; later collisions get `~2`, `~3`; a file over
+1 MiB is stored as `.json.gz`; use the index `file` field). That file repeats the standard header
+with the provider's own `plugin`, `pluginVersion`, `instrumentationVersion`, `reason`, `complete`
+and `error`, and a free-form `measurements` object exactly as the provider returned it (omitted if the provider failed).
 No registered providers means no plugin measurements, not zero plugin cost.
 
 Providers participate by default. `/diagnostics plugins start [seconds] [provider ...]` and

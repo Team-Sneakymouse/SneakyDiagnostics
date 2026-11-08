@@ -4,9 +4,11 @@ import com.teamsneakymouse.sneakydiagnostics.api.Diagnostics;
 import com.teamsneakymouse.sneakydiagnostics.capture.*;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
@@ -27,7 +29,7 @@ class PluginCollectorTest {
         collector.onTick(null);
         assertFalse(collector.active());
         assertEquals(1, sink.writes);
-        assertEquals(List.of("plugins-1.json", "plugins-magicspells-1.json", "plugins-voice-1.json"), sink.names());
+        assertEquals(List.of("plugins-magicspells-1.json", "plugins-voice-1.json", "plugins-1.json"), sink.names());
         var index = sink.report(null);
         assertEquals("shared", index.get("captureId"));
         assertEquals("completed", index.get("reason"));
@@ -105,9 +107,24 @@ class PluginCollectorTest {
         registry.register("my_plugin", "v", "i", new Probe(true));
         collector.start(context, List.of());
         collector.stop("completed");
-        assertEquals(List.of("plugins-1.json", "plugins-my_plugin-1.json", "plugins-my_plugin~2-1.json"), sink.names());
+        assertEquals(List.of("plugins-my_plugin-1.json", "plugins-my_plugin~2-1.json", "plugins-1.json"), sink.names());
         assertEquals("plugins-my_plugin~2-1.json", rows(sink.report(null).get("providers")).get(1).get("file"));
         assertEquals("my_plugin", sink.report("my_plugin~2").get("plugin"));
+    }
+
+    @Test void indexRecordsEachProviderFileAsStored() {
+        registry.register("MagicSpells", "v", "i", new Probe(true));
+        registry.register("Voice", "v", "i", new Probe(true));
+        registry.register("Lost", "v", "i", new Probe(true));
+        sink.compressed.add("magicspells");
+        sink.failing.add("lost");
+        collector.start(context, List.of());
+        collector.stop("completed");
+        var entries = rows(sink.report(null).get("providers"));
+        assertEquals("plugins-magicspells-1.json.gz", entries.get(0).get("file"));
+        assertEquals("plugins-voice-1.json", entries.get(1).get("file"));
+        // Not written: the planned name stays, so readers report the file as missing.
+        assertEquals("plugins-lost-1.json", entries.get(2).get("file"));
     }
 
     @Test void selectionStartsOnlyNamedProvidersAndIsRecorded() {
@@ -121,7 +138,7 @@ class PluginCollectorTest {
         assertEquals(1, chosen.stops);
         assertNull(other.capture);
         assertEquals(0, other.stops);
-        assertEquals(List.of("plugins-1.json", "plugins-chosen-1.json"), sink.names());
+        assertEquals(List.of("plugins-chosen-1.json", "plugins-1.json"), sink.names());
         var index = sink.report(null);
         assertEquals(List.of("Chosen"), index.get("selected"));
         assertEquals(1, rows(index.get("providers")).size());
@@ -191,10 +208,19 @@ class PluginCollectorTest {
         @Override public void write(String collector, CaptureContext context, int segment, Supplier<Map<String, Object>> report) {
             throw new AssertionError("plugins writes through the multi-file seam");
         }
-        @Override public void write(String collector, CaptureContext context, int segment, List<ReportFile> reports) {
+        /** Suffixes whose reports the fake stores compressed, and suffixes whose write fails. */
+        final Set<String> compressed = new HashSet<>(), failing = new HashSet<>();
+        @Override public void write(String collector, CaptureContext context, int segment, List<ReportFile> details, IndexReport index) {
             writes++;
             files.clear();
-            for (var file : reports) files.put(ReportSink.fileName(collector, file.suffix(), segment), file.report().get());
+            var storedNames = new HashMap<String, String>();
+            for (var file : details) {
+                if (failing.contains(file.suffix())) continue;
+                String name = ReportSink.fileName(collector, file.suffix(), segment);
+                files.put(name, file.report().get());
+                storedNames.put(file.suffix(), compressed.contains(file.suffix()) ? name + ".gz" : name);
+            }
+            files.put(ReportSink.fileName(collector, null, segment), index.build(storedNames));
         }
         List<String> names() { return new ArrayList<>(files.keySet()); }
         /** The index for a null slug, otherwise the provider file with that slug. */

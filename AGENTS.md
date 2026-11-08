@@ -17,3 +17,7 @@ Do not substitute remembered rules, a web mirror, or an unlisted path. Follow lo
 - **Report changes:** read the compatibility policy in [docs/report-schema-v2.md](docs/report-schema-v2.md); update the contract, affected readers, and fixtures together.
 - **Python tooling:** before running or modifying analysis tools, read [tools/README.md](tools/README.md) for isolated invocation and untrusted-input handling.
 - **Publishing:** before changing artifacts or publishing configuration, read [Publishing and development](README.md#publishing-and-development) for deployment metadata requirements.
+
+## Local notes
+
+Before connecting to any server or fetching captures, logs or other remote files, read `AGENTS.local.md` (untracked, may be absent) for connection details and access rules. Prefer the access it describes over other hosts or credentials found on the machine.

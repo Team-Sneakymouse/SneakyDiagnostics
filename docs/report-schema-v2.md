@@ -28,7 +28,8 @@ reports/<capture-id>/
 
 - `<provider>` is the lowercased plugin name with every character outside `[a-z0-9._-]`
   replaced by `_`. If two names collapse to the same slug in one capture, the later ones get
-  `~2`, `~3`. The `file` field of the index is authoritative; do not derive names in tools.
+  `~2`, `~3`. The `file` field of the index is authoritative and names the file as stored
+  (`.json.gz` when compressed); do not derive names in tools.
 - **Compression:** a JSON report whose serialized size exceeds 1 MiB is written gzip-compressed
   as `<name>.json.gz`. Smaller reports stay `.json`. Readers accept both. `.sparkprofile` is
   never recompressed. The manifest is never compressed.
@@ -67,6 +68,8 @@ Standard header plus:
 ```
 
 - Provider `complete` is per provider (coverage). It is never combined into other providers' status.
+- The index is written after the provider files, so each `file` is the stored name. A provider file
+  that failed to write keeps its planned `.json` name; readers report it missing.
 - Collector `complete` means the coordination was normal: reason `completed` and no provider
   failed to start or stop. An incomplete provider is listed in `incompleteProviders` and does
   not by itself make the collector incomplete.
@@ -177,6 +180,9 @@ shared probe emit this shape:
 - Existing captures (v1 `plugins-1.json` with embedded providers) stay readable by the analysis tools.
 - `complete` changed meaning: in v1 the collector's `complete` was false when any provider was incomplete;
   in v2 it only describes coordination, and coverage is per provider (`incompleteProviders`).
+- Writers before 2026-11 wrote the index first and listed a compressed provider file under its
+  uncompressed name (`plugins-magicspells-1.json` for `plugins-magicspells-1.json.gz`). The analysis
+  tools fall back to the `.json.gz` file in that case, with a warning.
 - In the manifest, the index and provider files all have `collector: "plugins"` (tell them apart by name:
   `plugins-1.json` is the index), and `spark-1.json` and `profile.sparkprofile` are listed with
   `collector: "spark"`.

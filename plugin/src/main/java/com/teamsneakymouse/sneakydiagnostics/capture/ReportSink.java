@@ -10,18 +10,29 @@ import java.util.function.Supplier;
  * After handoff, collectors must not mutate data reachable by those suppliers.
  */
 public interface ReportSink {
-    /** One JSON report. A null suffix is the collector's main file; others are named by {@link #fileName}. */
+    /** One detail report, named {@code <collector>-<suffix>-<segment>.json} by {@link #fileName}. */
     record ReportFile(String suffix, Supplier<Map<String, Object>> report) {}
+
+    /** Builds a collector's main report on the writer thread once its detail files are written. */
+    @FunctionalInterface
+    interface IndexReport {
+        /**
+         * {@code storedNames} maps each written detail suffix to its file name as stored, which ends in
+         * {@code .json.gz} when the report was compressed. A detail that failed to write has no entry.
+         */
+        Map<String, Object> build(Map<String, String> storedNames);
+    }
 
     boolean busy(String collector);
     Map<String, Object> header(String collector, CaptureContext context, String reason, int segment);
     void write(String collector, CaptureContext context, int segment, Supplier<Map<String, Object>> detachedReport);
 
     /**
-     * Several reports of one collector and segment, written in order on the writer thread. The collector
-     * stays busy until all are written; a failing file is logged and does not stop the others.
+     * Detail reports of one collector and segment, written in order on the writer thread, then the main
+     * report built from their stored names. The collector stays busy until all are written; a failing
+     * file is logged and does not stop the others.
      */
-    default void write(String collector, CaptureContext context, int segment, List<ReportFile> files) {
+    default void write(String collector, CaptureContext context, int segment, List<ReportFile> details, IndexReport index) {
         throw new UnsupportedOperationException("Multi-file reports are not supported by this sink");
     }
 
