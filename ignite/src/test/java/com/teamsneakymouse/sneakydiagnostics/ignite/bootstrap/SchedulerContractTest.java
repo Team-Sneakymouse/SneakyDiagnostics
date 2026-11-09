@@ -19,6 +19,20 @@ class SchedulerContractTest {
         type.methods.stream().filter(method -> method.name.equals("parsePending")).findFirst().orElseThrow().instructions.clear();
         assertThrows(IllegalStateException.class, () -> SchedulerContract.verify(type));
     }
+    @Test void listenerDispatchContractHoldsAndRejectsABypassedExecutor() throws Exception {
+        SchedulerContract.verify(readListener());
+        var type = readListener();
+        type.methods.stream().filter(method -> method.name.equals("callEvent")).findFirst().orElseThrow().instructions.clear();
+        assertThrows(IllegalStateException.class, () -> SchedulerContract.verify(type));
+    }
+    private ClassNode readListener() throws Exception {
+        try (var input = getClass().getClassLoader().getResourceAsStream(SchedulerContract.LISTENER + ".class")) {
+            assertNotNull(input, "Paper API must be on the test classpath");
+            var node = new ClassNode();
+            new ClassReader(input).accept(node, 0);
+            return node;
+        }
+    }
     private ClassNode read(String name) throws Exception {
         String external = System.getProperty("compatibilityServerJar");
         if (external != null) {

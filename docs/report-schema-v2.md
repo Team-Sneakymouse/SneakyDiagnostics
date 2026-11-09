@@ -4,7 +4,24 @@ The contract for the v2 report rework. Implementation tracks and the analysis to
 against this document; change it first when a decision changes. v2 is a clean break: every
 report written by this release carries `"schemaVersion": 2` in its header. Tools read v1 and
 v2 and tell them apart by that field. The layouts of `entities`, `timeline`, `scheduler`,
-`spark` and `connections` reports are unchanged apart from compression.
+`spark` and `connections` reports are unchanged apart from compression and the compatible additions
+listed under [Tick identity](#tick-identity) and [Scheduler: Ignite slow calls](#scheduler-ignite-slow-calls).
+
+## Tick identity
+
+Two server counters exist and they are **not interchangeable**:
+
+- the **tick number** (`ServerTickEndEvent.getTickNumber()`, Paper's `tickCount`): the timeline's `firstTick` and
+  `lastTick`;
+- the **current tick** (`Bukkit.getCurrentTick()`, `MinecraftServer.currentTick`): shared-probe `atTick`/`maxAtTick`,
+  Ignite record `tick`, MagicSpells slow-operation `tick`, and the timeline's `firstCurrentTick`/`lastCurrentTick`
+  (compatible addition, 2026-11: the current tick read at the same tick ends).
+
+Paper increments the current tick on every main-loop iteration. While the server pauses because it is empty, the loop
+still runs scheduled tasks but returns before the tick number advances or `ServerTickEndEvent` fires, so the current
+tick runs ahead by one per paused iteration, permanently. Match records to timeline windows only by
+`firstCurrentTick..lastCurrentTick`; timelines written before these fields existed cannot be tick-matched (readers fall
+back to end offsets and say so). Missing fields are unknown, never zero.
 
 ## Compatibility policy
 
@@ -113,7 +130,8 @@ shared probe emit this shape:
   containing that rank, so they overestimate by less than 2x.
 - **When:** `maxAtMillis` and `atMillis` are capture offsets (the shared monotonic origin) of the call's
   **end**, like the series;
-  `atTick` is the server tick number. `slowest` holds the 10 longest calls across all sections.
+  `atTick` is the current tick (`Bukkit.getCurrentTick()`, see [Tick identity](#tick-identity)), not the timeline's
+  tick number. `slowest` holds the 10 longest calls across all sections.
 - **Series:** windows are `[i*windowMillis, (i+1)*windowMillis)` of capture offset, aligned with the
   timeline report's one-second windows. Only the 16 sections with the largest `totalNanos` are
   included; `calls[i]` and `nanos[i]` are for window `i` (a call belongs to the window in which it ends;
@@ -137,6 +155,56 @@ shared probe emit this shape:
   (total) and `entities.owned.<bukkit entity type, lowercase>` as levels. Per-type counts only:
   no per-chunk or per-entity data. The entity census reports types in upper case; fold case to join them.
 - When no capture is running a probe does no work: no timing, no allocation, no string building.
+
+## Scheduler: Ignite slow calls
+
+Compatible additions to `scheduler-1.json`'s `ignite` map (bridge protocol stays 1). Companions built before
+2026-11 omit all three; readers report them as "not recorded", never as zero.
+
+```json
+"slowExecutions": { "thresholdNanos": 1000000, "capacity": 512, "observed": 3, "retained": 3, "evicted": 0,
+                    "complete": true, "records": [
+  { "event": "execution", "owner": "SneakyKnives", "taskClass": "...", "sync": true,
+    "startOffsetMicros": 52310412, "endOffsetMicros": 52638897, "nanos": 328485000,
+    "thread": "server", "tick": 246999, "throwing": false, "endedAfterDeadline": false } ] },
+"slowListeners": { "...same fields...": 0, "observedInvocations": 1820000, "runningAtStop": 1,
+                   "runningAroundStop": 1, "records": [
+  { "owner": "SneakyItems", "listenerClass": "...", "eventClass": "org.bukkit.event.inventory.InventoryOpenEvent",
+    "priority": "LOWEST", "asyncEvent": false, "startOffsetMicros": 0, "endOffsetMicros": 0, "nanos": 0,
+    "thread": "server", "tick": 0, "throwing": false, "endedAfterDeadline": false } ] },
+"runningAtStop": { "count": 0, "capacity": 32, "records": [
+  { "event": "execution", "owner": "...", "taskClass": "...", "sync": false, "startOffsetMicros": 0,
+    "runningNanosAtStop": 0 } ] },
+"measuredTicks": { "tick": [246999], "startOffsetMicros": [52310000], "endOffsetMicros": [52361000],
+                   "capacity": 2400, "dropped": 0 }
+```
+
+- Offsets are microseconds from the shared capture origin; `nanos` is inclusive wall time. Records are ordered by
+  start. Scheduler records may carry `caller` (cancellation and deferred-scan events).
+- `thread` is `server`, `other` or `unknown`; `tick` (`Bukkit.getCurrentTick()`, matched by the timeline's
+  `firstCurrentTick..lastCurrentTick`, never its tick numbers) is present only on the server thread. A missing `tick`
+  is unknown, not tick 0.
+- Listener `runningAtStop` counts calls begun before the stop that had not ended (it can include calls that ended
+  while the stop ran); `runningAroundStop` are those on the stopping thread's own stack (normally the SneakyDiagnostics
+  tick-end listener that stops the capture). Calls running on other threads may have been slow, so they make
+  `complete` false; enclosing ones do not. A slow call either appears in the list (or `evicted`) or is counted as
+  running: completion, the running set and the record are updated atomically with respect to the export.
+- Timings of `ServerTickEndEvent` listeners fall outside the timeline's tick duration, which Paper measures before
+  dispatching that event; readers report them apart from tick-time percentages.
+- `measuredTicks` (parallel lists, one entry per server tick, current-tick identity): the interval Paper measured as
+  that tick's duration. Paper reads the duration immediately before dispatching `ServerTickEndEvent`, so the interval
+  ends where the tick's first tick-end listener call began and starts `getTickDuration()` earlier (accurate to the
+  event's own dispatch, microseconds). It is recorded for every tick, whatever the listeners' durations; tick-end
+  listeners, the capture stop and empty-server pauses lie outside it. At most `capacity` (capture seconds x 40)
+  entries; `dropped` counts the rest. Ticks without a server tick identity are not recorded. Readers intersect
+  server-thread calls with these intervals for an exact covered share; for a window whose intervals are not all
+  present (older companion, dropped, capture-boundary tick) they can only remove retained tick-end listener records
+  and must label the share an upper bound.
+- Each list keeps the `capacity` longest calls of at least `thresholdNanos`. `observed` counts every call over the
+  threshold, `evicted = observed - retained`, `complete` is `observed == retained`. Eviction does not affect
+  `igniteComplete`.
+- Listener records time one listener's executor call, including nested events; scheduler records include listeners
+  their task triggers. Records overlap each other and provider sections: sum only their union per thread.
 
 ## `manifest.json`
 

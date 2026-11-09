@@ -50,7 +50,26 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
   pending changes and the snapshot's own cost. For probes with count/level series it also shows what the provider counted in that second
   and its sampled levels against their median (a level with no sample in that second is left out, not shown as zero).
   It also lists sections that are busier in slow windows than in other windows. A provider
-  with no series gets an explicit "cannot be attributed" statement. Ignite groups are aggregates, so they cannot be attributed to a window and the report says so.
+  with no series gets an explicit "cannot be attributed" statement. MagicSpells' operation series (execution-4) is shown per
+  window as outermost-scope time and self time by operation. **Slow calls** place individual timed calls in the window: Ignite's
+  slow scheduler and listener calls, each probe's `slowest` and per-section maxima, and MagicSpells' slow operations. A call is
+  placed by its server tick when the timeline has current-tick ranges (`firstCurrentTick..lastCurrentTick`, the same counter as
+  the records; its tick numbers are never used, they fall behind after an empty-server pause), otherwise by its end offset, and
+  the count placed by offset is shown. Ranges are validated endpoints searched by bisection, never expanded; inverted, partial or
+  overlapping ranges disable tick matching. Per window it shows the server-thread time covered by the union of these intervals
+  (nested and overlapping calls are not counted twice) inside the measured tick duration, and separately the time in
+  `ServerTickEndEvent` listeners (and calls nested in them), which Paper runs after measuring the tick, so it is not part of the
+  percentage. With Ignite's `measuredTicks` for every tick of the window the covered share is an exact intersection with the
+  intervals Paper measured as tick duration (tick-end work is excluded even when its listener left no record); otherwise
+  only retained tick-end listener records can be removed and the share is labelled an UPPER BOUND, per window and per tick.
+  Present-but-invalid current-tick endpoints (booleans, strings, partial) disable tick matching; only null or missing
+  endpoints count as absent. Coverage above the tick time is flagged, not clamped. Uncovered tick time is unattributed, not idle. MagicSpells
+  scopes that ended after the deadline (`series.late`) are shown in the post-deadline window only when they all ended in it.
+  Ignite groups remain aggregates; a companion without slow-call records is reported as such.
+- **Coverage audit**: enabled plugins (manifest) against registered providers, what each provider measures and its limits
+  (omitted keys, series left out, evicted slow records, unobserved counters), and the plugins without a provider ranked by
+  Ignite-measured scheduler time and slow listener calls. No provider means unmeasured, not zero cost; Ignite columns are
+  inclusive, overlap provider sections and cover only scheduler tasks and slow listener calls.
 - **Leads**: hypotheses derived from the numbers, kept apart from the observations above them.
 
 Rules the output follows: inclusive timings are never summed, units are in the column headers, missing or incomplete data is reported as a gap,

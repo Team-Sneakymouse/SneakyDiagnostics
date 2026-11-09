@@ -148,7 +148,93 @@ def analyze_magicspells(m: dict[str, Any], n: int) -> dict[str, Any]:
                  "views of the same scopes; do not add them."),
     }
     out["recovery"] = recover_spells(m, rows, totals, n)
+    out["slowOperations"] = slow_records(m.get("slowOperations"), n,
+                                         missing="not recorded (instrumentation before magicspells-execution-4)")
+    ms_series = magicspells_series(m)
+    out["hasSeries"] = ms_series is not None
+    out["seriesOperations"] = sorted(ms_series["operations"]) if ms_series else []
+    late = (ms_series or {}).get("late")
+    out["lateScopes"] = ({"rootCalls": late["rootCalls"], "outermostMs": ms(late["rootNanos"]),
+                          "lastEndOffsetMillis": late["lastEndOffsetMillis"]} if late and late["rootCalls"] else None)
+    lifecycle = m.get("taskLifecycle") if isinstance(m.get("taskLifecycle"), dict) else None
+    out["taskLifecycle"] = task_lifecycle(lifecycle) if lifecycle else None
+    coverage = m.get("counterCoverage")
+    out["counterCoverage"] = coverage if isinstance(coverage, dict) else None
     return out
+
+
+def slow_records(sec: Any, n: int, *, missing: str) -> dict[str, Any]:
+    """A bounded slow-call section (Ignite slowExecutions/slowListeners, MagicSpells slowOperations)."""
+    if not isinstance(sec, dict):
+        return {"available": False, "reason": missing}
+    records = [r for r in sec.get("records", []) if isinstance(r, dict)]
+    rows = sorted(records, key=lambda r: num(r.get("nanos")), reverse=True)
+    return {"available": True, "thresholdMs": ms(num(sec.get("thresholdNanos"))), "capacity": sec.get("capacity"),
+            "observed": num(sec.get("observed")), "retained": len(records), "evicted": num(sec.get("evicted")),
+            "complete": sec.get("complete"), "observedInvocations": sec.get("observedInvocations"),
+            "top": [dict(r, ms=ms(num(r.get("nanos"))), startMs=_offset_ms(r.get("startOffsetMicros")),
+                         endMs=_offset_ms(r.get("endOffsetMicros"))) for r in rows[:n]],
+            "note": ("Only calls at or above the threshold are kept, the longest first; 'evicted' counts slow calls "
+                     "left out for capacity. Durations are inclusive and overlap nested and parallel records.")}
+
+
+def _offset_ms(micros: Any) -> float | None:
+    return round(num(micros) / 1000, 3) if isinstance(micros, (int, float)) and not isinstance(micros, bool) else None
+
+
+def magicspells_series(m: dict[str, Any]) -> dict[str, Any] | None:
+    """MagicSpells per-second series (magicspells-execution-4+): outermost-scope time and per-operation self time."""
+    s = m.get("series")
+    if not isinstance(s, dict) or not isinstance(s.get("operations"), dict):
+        return None
+    wm = int(num(s.get("windowMillis")) or 1000)
+    ops = {k: {"calls": [num(x) for x in v.get("calls", [])], "selfNanos": [num(x) for x in v.get("selfNanos", [])]}
+           for k, v in s["operations"].items() if isinstance(v, dict)}
+    roots = [num(x) for x in s.get("rootNanos", [])]
+    late = s.get("late") if isinstance(s.get("late"), dict) else None
+    late_view = None
+    if late and isinstance(late.get("operations"), dict):
+        last_end = num(late.get("lastEndOffsetMillis"))
+        first = len(roots)  # the late bucket starts where the regular windows end (at the deadline)
+        late_view = {"rootNanos": num(late.get("rootNanos")), "rootCalls": num(late.get("rootCalls")),
+                     "lastEndOffsetMillis": last_end,
+                     "operations": {k: {"calls": num(v.get("calls")), "selfNanos": num(v.get("selfNanos"))}
+                                    for k, v in late["operations"].items() if isinstance(v, dict)},
+                     # every late scope ended in window `first` (the timeline's post-deadline window) or later
+                     "fitsWindow": first if num(late.get("rootCalls")) and last_end < (first + 1) * wm else None}
+    return {"windowMillis": wm, "rootNanos": roots,
+            "rootCalls": [num(x) for x in s.get("rootCalls", [])], "operations": ops, "late": late_view}
+
+
+def task_lifecycle(t: dict[str, Any]) -> dict[str, Any]:
+    """Why the MagicSpells task lifecycle is partial, and which unattributed origins are infrastructure."""
+    groups = [g for g in t.get("groups", []) if isinstance(g, dict)]
+    events = ("registrations", "executions", "callbackCompletions", "cancellationRequests", "trackedCancellations",
+              "cleanupTerminations")
+    by_origin: dict[str, float] = {}
+    for g in groups:
+        if g.get("spell") == "[unattributed]":
+            by_origin[str(g.get("origin"))] = by_origin.get(str(g.get("origin")), 0) + sum(num(g.get(e)) for e in events)
+    unattributed = [{"origin": o, "events": v, "kind": _origin_kind(o)}
+                    for o, v in sorted(by_origin.items(), key=lambda kv: kv[1], reverse=True)]
+    reasons = t.get("incompleteReasons")
+    return {"inventoryComplete": t.get("inventoryComplete"), "lifecycleComplete": t.get("lifecycleComplete"),
+            "incompleteReasons": reasons if isinstance(reasons, list) else None,
+            "endObservedAfterDeadline": t.get("endObservedAfterDeadline"),
+            "endObservedLateMillis": t.get("endObservedLateMillis"),
+            "unknownOwnerEvents": num(t.get("unknownOwnerEvents")),
+            "unattributedByOrigin": unattributed[:10],
+            "note": ("'spell code' origins scheduled inside a spell without passing it as owner: attribution gaps. "
+                     "Listener and core origins may have no spell owner by design (managers, casts not yet resolved). "
+                     "lifecycleComplete stays false for either.")}
+
+
+def _origin_kind(origin: str) -> str:
+    if origin.startswith("com.nisovin.magicspells.spells."):
+        return "spell code"
+    if origin.startswith("com.nisovin.magicspells.listeners."):
+        return "listener"
+    return "core/manager"
 
 
 def _ms_view(r: dict[str, Any], label: str | None = None) -> dict[str, Any]:

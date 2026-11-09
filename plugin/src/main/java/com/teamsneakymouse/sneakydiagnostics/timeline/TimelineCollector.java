@@ -5,6 +5,7 @@ import com.teamsneakymouse.sneakydiagnostics.capture.CaptureContext;
 import com.teamsneakymouse.sneakydiagnostics.capture.DiagnosticCollector;
 import com.teamsneakymouse.sneakydiagnostics.capture.ReportSink;
 import java.util.List;
+import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -33,7 +34,8 @@ public final class TimelineCollector implements DiagnosticCollector, Listener {
         if (!active()) return;
         long begin = System.nanoTime();
         long millis = context.offsetMillis();
-        timeline.record(millis, event.getTickNumber(), event.getTickDuration());
+        // Both counters: the tick number for continuity, the current tick to match scheduler/listener/probe records.
+        timeline.record(millis, event.getTickNumber(), Bukkit.getCurrentTick(), event.getTickDuration());
         long overhead = System.nanoTime() - begin;
         overheadNanos += overhead;
         maxOverheadNanos = Math.max(maxOverheadNanos, overhead);
@@ -51,7 +53,9 @@ public final class TimelineCollector implements DiagnosticCollector, Listener {
         report.put("maxCollectionNanos", maxOverheadNanos);
         report.put("notes", "Tick-end duration from Paper; excludes remaining tick-end listeners and idle sleep. "
                 + "Windows are indexed by tick-end observation offset, not tick start. Missing seconds contain no observed tick ends. "
-                + "This measures the whole server, not individual plugin CPU cost. Report dispatch is outside collection timing.");
+                + "This measures the whole server, not individual plugin CPU cost. Report dispatch is outside collection timing. "
+                + "firstTick/lastTick are Paper tick numbers; firstCurrentTick/lastCurrentTick are Bukkit.getCurrentTick() at the same tick ends, "
+                + "the counter other records carry (it also advances while the server pauses when empty, without tick ends).");
         context = null;
         timeline = null;
         reports.write(name(), finished, 1, () -> report);
