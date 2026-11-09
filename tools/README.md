@@ -69,7 +69,11 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
 - **Coverage audit**: enabled plugins (manifest) against registered providers, what each provider measures and its limits
   (omitted keys, series left out, evicted slow records, unobserved counters), and the plugins without a provider ranked by
   Ignite-measured scheduler time and slow listener calls. No provider means unmeasured, not zero cost; Ignite columns are
-  inclusive, overlap provider sections and cover only scheduler tasks and slow listener calls.
+  inclusive, overlap provider sections and cover only scheduler tasks and slow listener calls. Absence of a provider is
+  established only by a captured plugins index: without it (a scheduler-only capture) every plugin's provider status is
+  unknown, none is reported missing, and Ignite-measured owners are listed under unknown status instead. Slow-call lists
+  name why they are incomplete: evicted shorter calls, or listener calls still running on other threads at stop (counted,
+  durations unknown); calls enclosing the stop itself are shown but are not a gap.
 - **Leads**: hypotheses derived from the numbers, kept apart from the observations above them.
 
 Rules the output follows: inclusive timings are never summed, units are in the column headers, missing or incomplete data is reported as a gap,

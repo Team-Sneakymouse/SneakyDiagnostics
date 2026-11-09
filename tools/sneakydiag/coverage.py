@@ -22,13 +22,16 @@ def analyze_coverage(cap: Capture, providers: list[dict[str, Any]], scheduler: d
     slow_tasks = bool(ignite) and isinstance(ignite.get("slowExecutions"), dict)
     slow_listeners = bool(ignite) and isinstance(ignite.get("slowListeners"), dict)
     selection = cap.selected
+    # Absence of a provider is established only by a captured collector index (v2 plugins-1.json or v1 embedded list).
+    # Without it (scheduler-only capture, lost index) registration is unknown, not missing.
+    inventory = cap.index is not None
     rows = []
     for name in sorted(set(enabled) | set(by_name), key=str.lower):
         p = by_name.get(name)
         o = owners.get(name, {})
         row: dict[str, Any] = {
             "plugin": name, "enabled": name in enabled if enabled else None,
-            "provider": _status(p, selection),
+            "provider": _status(p, selection, inventory),
             "instrumentation": p.get("instrumentationVersion") if p else None,
             "measured": _measured(p) if p else None,
             "limits": _limits(p) if p else [],
@@ -41,7 +44,9 @@ def analyze_coverage(cap: Capture, providers: list[dict[str, Any]], scheduler: d
             "_rank": o.get("syncNanos", 0) + o.get("slowListenerNanos", 0),
         }
         rows.append(row)
-    gaps = sorted((r for r in rows if r["provider"] == "none" and r["_rank"] > 0), key=lambda r: r["_rank"], reverse=True)
+    measured = sorted((r for r in rows if r["_rank"] > 0), key=lambda r: r["_rank"], reverse=True)
+    gaps = [r for r in measured if r["provider"] == "none"]
+    unknown = [r for r in measured if r["provider"] == UNKNOWN]
     for r in rows:
         r.pop("_rank", None)
     listeners = ignite.get("slowListeners") if ignite and isinstance(ignite.get("slowListeners"), dict) else None
@@ -51,19 +56,32 @@ def analyze_coverage(cap: Capture, providers: list[dict[str, Any]], scheduler: d
         "enabledSource": "manifest server.plugins" if enabled else "unknown (no manifest plugin list; v1 capture?)",
         "providers": len(providers),
         "selection": selection,
+        "providerInventory": "captured" if inventory else "not captured",
         "igniteAvailable": ignite is not None,
         "slowListenerRecords": listeners is not None,
         "rows": rows,
-        "missingProvidersByMeasuredTime": [{k: r[k] for k in ("plugin", "igniteSyncTaskMs", "igniteSyncTaskRuns",
-                                                              "slowListenerCalls", "slowListenerMs")} for r in gaps],
-        "note": NOTE + ("" if selection in (None, "all") else
-                        " Providers were selected for this capture, so a plugin shown without one may be registered "
-                        "but unselected."),
+        "missingProvidersByMeasuredTime": [_gap(r) for r in gaps],
+        "unknownProviderByMeasuredTime": [_gap(r) for r in unknown],
+        "note": NOTE + ("" if inventory else
+                        " The plugins collector was not captured, so which plugins have a provider is unknown: none "
+                        "is reported missing.")
+                + ("" if selection in (None, "all") else
+                   " Providers were selected for this capture, so a plugin shown without one may be registered "
+                   "but unselected."),
     }
 
 
-def _status(p: dict[str, Any] | None, selection: Any) -> str:
+UNKNOWN = "unknown (plugins collector not captured)"
+
+
+def _gap(r: dict[str, Any]) -> dict[str, Any]:
+    return {k: r[k] for k in ("plugin", "igniteSyncTaskMs", "igniteSyncTaskRuns", "slowListenerCalls", "slowListenerMs")}
+
+
+def _status(p: dict[str, Any] | None, selection: Any, inventory: bool = True) -> str:
     if p is None:
+        if not inventory:
+            return UNKNOWN
         return "none" if selection in (None, "all") else "none or not selected"
     if p.get("kind") == "unavailable":
         return "registered, measurements unavailable"

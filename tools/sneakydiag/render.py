@@ -238,9 +238,17 @@ def _slow(title: str, sec: dict[str, Any] | None, cols: list[tuple[str, str]], i
         return []
     if not sec.get("available"):
         return [f"{indent}{title}: {sec.get('reason')}"]
+    gaps = []
+    if sec.get("evicted"):
+        gaps.append("shorter slow calls were left out")
+    if sec.get("runningOtherThreads"):
+        gaps.append(f"{sec['runningOtherThreads']:g} still running on other threads at stop (durations unknown)")
+    if not sec.get("complete") and not gaps:
+        gaps.append("the report records no cause")
     o = [f"{indent}{title}: {sec['observed']:,.0f} calls >= {sec['thresholdMs']} ms, {sec['retained']} kept "
          f"(capacity {sec['capacity']}), {sec['evicted']:,.0f} evicted"
-         + ("" if sec.get("complete") else " - INCOMPLETE: shorter slow calls were left out")
+         + ("" if sec.get("complete") else " - INCOMPLETE: " + "; ".join(gaps))
+         + (f"; {sec['runningAroundStop']:g} enclosing the stop (expected, not a gap)" if sec.get("runningAroundStop") else "")
          + (f"; {sec['observedInvocations']:,} calls observed in total" if sec.get("observedInvocations") is not None else "")]
     o += table(sec["top"], cols, indent + "  ")
     return o
@@ -446,6 +454,12 @@ def _coverage(c: dict[str, Any] | None) -> list[str]:
     o.append(f"  {c['providers']} providers; enabled plugins: {c['enabledPlugins'] if c['enabledPlugins'] is not None else 'unknown'}"
              f" ({c['enabledSource']}); Ignite {'present' if c['igniteAvailable'] else 'absent'}"
              + ("" if c["slowListenerRecords"] or not c["igniteAvailable"] else "; no slow-listener records"))
+    if c.get("providerInventory") == "not captured":
+        o.append("  provider inventory not captured (no plugins collector index): no plugin is reported as missing a "
+                 "provider. Ignite-measured owners, provider status unknown:")
+        o += table(c.get("unknownProviderByMeasuredTime", []),
+                   [("plugin", "plugin"), ("igniteSyncTaskMs", "sync task ms"), ("igniteSyncTaskRuns", "runs"),
+                    ("slowListenerCalls", "slow listener calls"), ("slowListenerMs", "slow listener ms")], "    ")
     if c["missingProvidersByMeasuredTime"]:
         o.append("  NO PROVIDER, but Ignite measured time (priority for new providers; inclusive, overlapping):")
         o += table(c["missingProvidersByMeasuredTime"], [("plugin", "plugin"), ("igniteSyncTaskMs", "sync task ms"),

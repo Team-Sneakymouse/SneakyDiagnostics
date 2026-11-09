@@ -254,3 +254,36 @@ def test_without_all_measured_intervals_coverage_is_an_explicit_upper_bound(tmp_
                           timeline_edit=fx.with_current_ticks(0), scheduler_edit=_measured(bad)))
     assert r["correlation"]["measuredTicks"]["available"] is False
     assert slow_window(r)["slowCalls"]["coverageAssurance"] == "upper-bound"
+
+
+# ---------------------------------------------------------------- PR #4 review: provider inventory, running listeners
+
+
+def test_without_the_plugins_collector_provider_status_is_unknown_not_missing(tmp_path):
+    r = run(fx.v2_capture(tmp_path, slow=True, plugins_collector=False, enabled=("Alpha", "Gamma", "Delta")))
+    c = r["coverage"]
+    assert c["providerInventory"] == "not captured"
+    assert {row["provider"] for row in c["rows"]} == {"unknown (plugins collector not captured)"}
+    assert c["missingProvidersByMeasuredTime"] == []      # absence was never established
+    # Alpha too: without the inventory its provider is as unknown as the others'
+    assert [row["plugin"] for row in c["unknownProviderByMeasuredTime"]] == ["Gamma", "Alpha", "Delta"]
+    text = render(r)
+    assert "provider inventory not captured" in text and "NO PROVIDER" not in text
+    # with the collector captured, the same plugins are reported as missing providers
+    r = run(fx.v2_capture(tmp_path / "with", slow=True, enabled=("Alpha", "Gamma", "Delta")))
+    assert r["coverage"]["providerInventory"] == "captured"
+    assert [m["plugin"] for m in r["coverage"]["missingProvidersByMeasuredTime"]] == ["Gamma", "Delta"]
+
+
+def test_listeners_running_at_stop_are_reported_apart_from_eviction(tmp_path):
+    def running(sc):
+        sl = sc["ignite"]["slowListeners"]
+        sl.update({"runningAtStop": 2, "runningAroundStop": 1, "complete": False})   # evicted stays 0
+    r = run(fx.v2_capture(tmp_path, slow=True, scheduler_edit=running))
+    sl = r["scheduler"]["ignite"]["slowListeners"]
+    assert sl["runningAtStop"] == 2 and sl["runningAroundStop"] == 1 and sl["runningOtherThreads"] == 1
+    text = render(r)
+    listener_line = next(line for line in text.splitlines() if "Ignite slow listener calls" in line)
+    assert "shorter slow calls were left out" not in listener_line
+    assert "1 still running on other threads at stop" in listener_line
+    assert "1 enclosing the stop" in listener_line

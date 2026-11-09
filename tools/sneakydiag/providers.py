@@ -169,9 +169,14 @@ def slow_records(sec: Any, n: int, *, missing: str) -> dict[str, Any]:
         return {"available": False, "reason": missing}
     records = [r for r in sec.get("records", []) if isinstance(r, dict)]
     rows = sorted(records, key=lambda r: num(r.get("nanos")), reverse=True)
+    running = sec.get("runningAtStop") if isinstance(sec.get("runningAtStop"), (int, float)) else None
+    around = sec.get("runningAroundStop") if isinstance(sec.get("runningAroundStop"), (int, float)) else None
     return {"available": True, "thresholdMs": ms(num(sec.get("thresholdNanos"))), "capacity": sec.get("capacity"),
             "observed": num(sec.get("observed")), "retained": len(records), "evicted": num(sec.get("evicted")),
             "complete": sec.get("complete"), "observedInvocations": sec.get("observedInvocations"),
+            # listener calls not ended at stop (durations unknown); those enclosing the stop do not make it incomplete
+            "runningAtStop": running, "runningAroundStop": around,
+            "runningOtherThreads": max(0, running - (around or 0)) if running is not None else None,
             "top": [dict(r, ms=ms(num(r.get("nanos"))), startMs=_offset_ms(r.get("startOffsetMicros")),
                          endMs=_offset_ms(r.get("endOffsetMicros"))) for r in rows[:n]],
             "note": ("Only calls at or above the threshold are kept, the longest first; 'evicted' counts slow calls "

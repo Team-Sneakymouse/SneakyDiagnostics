@@ -220,7 +220,8 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
                provider_complete: bool = True, with_workload: bool = True, instrumentation: str = "alpha-1",
                failed_providers: tuple[str, ...] = (), gz_providers: tuple[str, ...] = (),
                planned_index_names: bool = False, slow: bool = False, gamma: bool = False,
-               enabled: tuple[str, ...] = ("Alpha",), timeline_edit: Any = None, scheduler_edit: Any = None) -> Path:
+               enabled: tuple[str, ...] = ("Alpha",), timeline_edit: Any = None, scheduler_edit: Any = None,
+               plugins_collector: bool = True) -> Path:
     """A v2 folder: manifest, index, per-provider files, optionally gzipped reports.
 
     ``gz_providers`` stores those providers' files compressed. The index names each file as stored, unless
@@ -253,7 +254,8 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
     add("scheduler-1.json", "scheduler", sc, "scheduler" in gz)
     add("entities-1.json", "entities", {**entities(2), **cid}, "entities" in gz)
     index_entries = []
-    all_probes = {**probes, **(extra_providers or {})}
+    # plugins_collector=False: a capture without the plugins collector (e.g. scheduler only): no index, no provider files
+    all_probes = {**probes, **(extra_providers or {})} if plugins_collector else {}
     for plugin, meas in all_probes.items():
         slug = plugin.lower()
         fname = f"plugins-{slug}-1.json"
@@ -276,7 +278,8 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
     index = {**header("plugins", 2, captureId=capture_id), "selected": "all", "providers": index_entries,
              "incompleteProviders": [e["plugin"] for e in index_entries if not e["complete"]],
              "complete": not failed_providers, "notes": "x"}
-    add("plugins-1.json", "plugins", index, False)
+    if plugins_collector:
+        add("plugins-1.json", "plugins", index, False)
     manifest: dict[str, Any] = {
         "schemaVersion": 2, "captureId": capture_id, "captureStartedAt": START, "requestedDurationSeconds": 5,
         "updatedAt": "2026-01-01T12:00:07Z",
