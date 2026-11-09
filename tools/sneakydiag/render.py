@@ -55,6 +55,7 @@ def render(r: dict[str, Any]) -> str:
     o.extend(_entities(r["entities"]))
     o.extend(_spark(r["spark"]))
     o.extend(_correlation(r["correlation"]))
+    o.extend(_coverage(r.get("coverage")))
     o.extend(_leads(r))
     return "\n".join(o) + "\n"
 
@@ -207,6 +208,49 @@ def _magicspells(m: dict[str, Any]) -> list[str]:
     o += table(m["topDetailRowsBySelf"], [("operation", "op"), ("spell", "spell"), ("detail", "detail"),
                                           ("calls", "calls"), ("selfMs", "self ms"), ("maxMs", "max ms")], "    ")
     o.append("  " + m["note"])
+    o.append("  per-second series: " + (", ".join(m["seriesOperations"]) if m.get("hasSeries") else
+                                        "NONE (cannot be placed in timeline windows)"))
+    if m.get("lateScopes"):
+        lt = m["lateScopes"]
+        o.append(f"  scopes that ended after the deadline (kept apart from the windows): {lt['rootCalls']:g} outermost, "
+                 f"{lt['outermostMs']} ms, the last ending at {lt['lastEndOffsetMillis']:g} ms")
+    o += _slow("slow operations (capture offset / tick)", m.get("slowOperations"),
+               [("operation", "op"), ("spell", "spell"), ("detail", "detail"), ("depth", "depth"), ("ms", "ms"),
+                ("selfNanos", "self ns"), ("startMs", "start ms"), ("endMs", "end ms"), ("tick", "tick")])
+    for counter, state in (m.get("counterCoverage") or {}).items():
+        if state != "observed":
+            o.append(f"  counter {counter}: {state}")
+    t = m.get("taskLifecycle")
+    if t:
+        o.append(f"  task lifecycle: inventoryComplete={t['inventoryComplete']} lifecycleComplete={t['lifecycleComplete']}"
+                 + (f"; reasons: {', '.join(t['incompleteReasons'])}" if t.get("incompleteReasons") else "")
+                 + (f"; end inventory {t['endObservedLateMillis']} ms after the deadline"
+                    if t.get("endObservedLateMillis") else ""))
+        if t["unattributedByOrigin"]:
+            o.append("  unattributed task events by scheduling origin:")
+            o += table(t["unattributedByOrigin"], [("origin", "origin"), ("events", "events"), ("kind", "kind")], "    ")
+            o.append("  " + t["note"])
+    return o
+
+
+def _slow(title: str, sec: dict[str, Any] | None, cols: list[tuple[str, str]], indent: str = "  ") -> list[str]:
+    if not sec:
+        return []
+    if not sec.get("available"):
+        return [f"{indent}{title}: {sec.get('reason')}"]
+    gaps = []
+    if sec.get("evicted"):
+        gaps.append("shorter slow calls were left out")
+    if sec.get("runningOtherThreads"):
+        gaps.append(f"{sec['runningOtherThreads']:g} still running on other threads at stop (durations unknown)")
+    if not sec.get("complete") and not gaps:
+        gaps.append("the report records no cause")
+    o = [f"{indent}{title}: {sec['observed']:,.0f} calls >= {sec['thresholdMs']} ms, {sec['retained']} kept "
+         f"(capacity {sec['capacity']}), {sec['evicted']:,.0f} evicted"
+         + ("" if sec.get("complete") else " - INCOMPLETE: " + "; ".join(gaps))
+         + (f"; {sec['runningAroundStop']:g} enclosing the stop (expected, not a gap)" if sec.get("runningAroundStop") else "")
+         + (f"; {sec['observedInvocations']:,} calls observed in total" if sec.get("observedInvocations") is not None else "")]
+    o += table(sec["top"], cols, indent + "  ")
     return o
 
 
@@ -240,6 +284,18 @@ def _scheduler(s: dict[str, Any] | None) -> list[str]:
         o += table(ig["topExecutionGroups"], [("owner", "owner"), ("sync", "sync"), ("taskClass", "task class"),
                                               ("started", "started"), ("totalMsInclusive", "total ms (incl.)")], "    ")
         o.append("  " + ig["note"])
+        o += _slow("Ignite slow task calls", ig.get("slowExecutions"),
+                   [("event", "event"), ("owner", "owner"), ("taskClass", "task class"), ("ms", "ms"),
+                    ("startMs", "start ms"), ("endMs", "end ms"), ("thread", "thread"), ("tick", "tick")])
+        o += _slow("Ignite slow listener calls", ig.get("slowListeners"),
+                   [("owner", "owner"), ("listenerClass", "listener"), ("eventClass", "event"), ("ms", "ms"),
+                    ("startMs", "start ms"), ("thread", "thread"), ("tick", "tick")])
+        running = ig.get("runningAtStop")
+        if running and running.get("count"):
+            o.append(f"  scheduler calls still running at stop: {running['count']} (no completed duration)")
+            o += table(running.get("records", []), [("event", "event"), ("owner", "owner"), ("taskClass", "task class"),
+                                                    ("startOffsetMicros", "start us"),
+                                                    ("runningNanosAtStop", "running ns")], "    ")
     else:
         o.append("  no Ignite section: execution/cancellation attribution unavailable (public snapshots only)")
     return o
@@ -287,6 +343,11 @@ def _correlation(c: dict[str, Any]) -> list[str]:
     o.append("  " + c["note"])
     if c.get("igniteNote"):
         o.append("  " + c["igniteNote"])
+    if c.get("slowCallNote"):
+        o.append("  " + c["slowCallNote"])
+    tm = c.get("tickMatching")
+    if tm and not tm.get("available"):
+        o.append(f"  tick matching unavailable: {tm['reason']}; {tm['note']}")
     lift = c["lift"]
     if lift["available"]:
         o.append(f"  sections busier in slow windows ({lift['slowWindows']}) than in other windows ({lift['otherWindows']}):")
@@ -316,6 +377,36 @@ def _correlation(c: dict[str, Any]) -> list[str]:
             om = p.get("omittedKeySeries") or {}
             if om.get("counts") or om.get("levels"):
                 o.append(f"      no series (report budget): {len(om.get('counts', []))} counts, {len(om.get('levels', []))} levels")
+        for msw in w.get("magicSpells", []):
+            if msw.get("note"):
+                o.append(f"    {msw['plugin']}: {msw['note']}")
+            else:
+                o.append(f"    {msw['plugin']}: outermost scopes {msw['outermostScopesMs']} ms "
+                         f"({msw['pctOfWindowTickTime']}% of tick time); self by operation: "
+                         + (", ".join(f"{x['operation']} {x['selfMs']} ms" for x in msw["operationsBySelf"]) or "none"))
+        sl = w.get("slowCalls")
+        if sl is not None:
+            o.append(f"    slow calls placed in this window: {sl['count']}"
+                     + (f" ({sl['placedByOffset']} by end offset)" if sl["placedByOffset"] else "")
+                     + f"; server-thread time covered inside the measured tick duration (union, no double counting) "
+                     f"{sl['serverThreadCoveredMs']} ms = {sl['pctOfWindowTickTime']}% of tick time"
+                     + (f"; plus {sl['tickEndListenerMs']} ms in ServerTickEndEvent listeners (after the tick duration was "
+                        f"measured, not in the percentage)" if sl["tickEndListenerMs"] else "")
+                     + (f"; {sl['otherThreadCalls']} on other threads" if sl["otherThreadCalls"] else ""))
+            if sl.get("coverageAssurance") == "upper-bound" and sl["serverThreadCoveredMs"]:
+                o.append("      UPPER BOUND: " + sl["coverageNote"])
+            elif sl.get("outsideMeasuredTickMs"):
+                o.append(f"      exact against the measured tick intervals; {sl['outsideMeasuredTickMs']} ms of these calls ran "
+                         "outside them (tick-end listeners, the stop)")
+            if sl["exceedsTickTime"]:
+                o.append("      NOTE covered time exceeds the window's tick time: some calls ran outside the measured tick "
+                         "duration in a phase that cannot be identified (or probe offsets, whole milliseconds, overlap)")
+            for t in sl["byTick"]:
+                o.append(f"      tick {t['tick']}: covered {t['coveredMs']} ms"
+                         + (f" (+{t['tickEndListenerMs']} ms tick-end listeners)" if t["tickEndListenerMs"] else "")
+                         + f" by {t['calls']} calls; longest: " + "; ".join(t["longest"]))
+            o += table(sl["calls"], [("source", "source"), ("label", "call"), ("ms", "ms"), ("startMs", "start ms"),
+                                     ("endMs", "end ms"), ("tick", "tick"), ("thread", "thread")], "      ")
         sc = w["scheduler"]
         if sc.get("note"):
             o.append("    scheduler: " + sc["note"])
@@ -353,4 +444,35 @@ def _leads(r: dict[str, Any]) -> list[str]:
         o.append(f"  - Entities: owner hint '{k}' covers {v:,} sampled entities; counts do not establish tick cost.")
     if len(o) == n0:
         o.append("  (none: not enough measurements)")
+    return o
+
+
+def _coverage(c: dict[str, Any] | None) -> list[str]:
+    o = _head("Coverage audit (enabled plugins vs providers)")
+    if not c or not c.get("available"):
+        return o + ["  no plugin list or providers to audit"]
+    o.append(f"  {c['providers']} providers; enabled plugins: {c['enabledPlugins'] if c['enabledPlugins'] is not None else 'unknown'}"
+             f" ({c['enabledSource']}); Ignite {'present' if c['igniteAvailable'] else 'absent'}"
+             + ("" if c["slowListenerRecords"] or not c["igniteAvailable"] else "; no slow-listener records"))
+    if c.get("providerInventory") == "not captured":
+        o.append("  provider inventory not captured (no plugins collector index): no plugin is reported as missing a "
+                 "provider. Ignite-measured owners, provider status unknown:")
+        o += table(c.get("unknownProviderByMeasuredTime", []),
+                   [("plugin", "plugin"), ("igniteSyncTaskMs", "sync task ms"), ("igniteSyncTaskRuns", "runs"),
+                    ("slowListenerCalls", "slow listener calls"), ("slowListenerMs", "slow listener ms")], "    ")
+    if c["missingProvidersByMeasuredTime"]:
+        o.append("  NO PROVIDER, but Ignite measured time (priority for new providers; inclusive, overlapping):")
+        o += table(c["missingProvidersByMeasuredTime"], [("plugin", "plugin"), ("igniteSyncTaskMs", "sync task ms"),
+                                                         ("igniteSyncTaskRuns", "runs"), ("slowListenerCalls", "slow listener calls"),
+                                                         ("slowListenerMs", "slow listener ms")], "    ")
+    o.append("  all plugins:")
+    o += table(c["rows"], [("plugin", "plugin"), ("provider", "provider"), ("instrumentation", "instrumentation"),
+                           ("measured", "measures"), ("igniteSyncTaskMs", "sync task ms"),
+                           ("slowListenerCalls", "slow listeners"), ("slowTaskCalls", "slow tasks")], "    ")
+    limited = [r for r in c["rows"] if r["limits"]]
+    if limited:
+        o.append("  provider limits:")
+        for r in limited:
+            o.append(f"    - {r['plugin']}: " + "; ".join(r["limits"]))
+    o.append("  " + c["note"])
     return o

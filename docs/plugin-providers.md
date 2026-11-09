@@ -37,7 +37,8 @@ rest unchanged. It is the only class that touches the API, it contains no timing
 the file is identical in every plugin except for its package declaration.
 
 When changing the shared shim, update this canonical snippet and coordinate the corresponding updates in
-every consumer repository (including Casino, Powerplant, Switches, and Heist). Keep consumer copies aligned
+every consumer repository (including Casino, Powerplant, Switches, Heist, Haunted, Items, GroundItems, Knives,
+Vaults and PrototypeKit). Keep consumer copies aligned
 with this snippet rather than introducing plugin-specific behavior into the shim.
 
 ```java
@@ -230,7 +231,12 @@ These snippets and the shim are compiled by the SneakyDiagnostics tests
    unchanged instrumentation does not bump it (the plugin version is reported separately). Tools compare
    captures only within one instrumentation version.
 9. **Keep it cheap.** One section per meaningful piece (a tick, a phase, a handler, a kind of work), not per
-   entity or per block.
+   entity or per block. A section costs about 40 ns while recording and a count about 20 ns (warm loop, 2026-11);
+   time a unit only when its own work is far larger. Per-item sections are acceptable when each item is substantial
+   work and the item is what you are asking about: SneakyItems times each processed item because every item is
+   checked against ~1.5k legacy mappings. Never time a sub-microsecond call that runs thousands of times per
+   operation (for example one hash lookup inside such a loop): count it with a constant name instead and read its cost
+   from the enclosing section's self time divided by the count.
 10. **One `sampleDue()` site per plugin.** The recorder hands each second's sampling slot to whichever call asks
     first, so two scheduled tasks that both call `sampleDue()` make each other skip levels. Sample every level
     from a single place (for example one `sampleLevels()` method called from the main tick) and let other tasks
@@ -360,16 +366,19 @@ Diagnostics-only reload. Only the contents of `measurements` differ.
 
 **What a custom provider costs:**
 1. **Tooling:** its `measurements` are free-form. There are no per-second series, percentiles or slowest-call
-   offsets, so slow timeline windows cannot be attributed to it. The analysis tools carry provider-specific recovery
-   code (for example MagicSpells' mixed-case spell totals) and refuse to rank if the fields they rely on change
-   meaning. Changing a custom provider's report means changing the tools in the same step.
+   offsets unless the provider builds its own (MagicSpells does since `magicspells-execution-4`: an operation series
+   and slow operations; Voice does not), so slow timeline windows cannot otherwise be attributed to it. The analysis
+   tools carry provider-specific code (for example MagicSpells' mixed-case spell totals and its series) and refuse to
+   rank if the fields they rely on change meaning. Changing a custom provider's report means changing the tools in
+   the same step.
 2. **Duplicated lifecycle code:** each custom provider keeps its own copy of the small `DiagnosticsAttachment`
    class (see MagicSpells `util/performance` and SneakyVoiceChat `diagnostics`), as the shim does. A copy per
    plugin is required so the API class is never loaded when SneakyDiagnostics is absent; a change to the pattern
    must be applied in every copy.
 3. **One provider per plugin name:** a plugin cannot use the shared probe for a few coarse sections alongside its
-   custom provider. Placing a spike in time (MagicSpells' 692 ms variable save is the known case) would need
-   either two registrations per plugin or a custom provider that embeds a probe. Neither exists yet.
+   custom provider. To place spikes in time a custom provider records its own timestamped data, as MagicSpells'
+   `series` and `slowOperations` do; Ignite's slow scheduler and listener calls cover scheduled work and listeners of
+   any plugin.
 
 ## Custom providers (v1 API)
 
@@ -473,7 +482,23 @@ detached report against the consumer's limits, including partial results on unre
 
 ## MagicSpells scheduler capture
 
-`magicspells-execution-3` uses the existing protocol and optional adapter. Case-folded
+`magicspells-execution-4` uses the existing protocol and optional adapter. It adds, within the same report budget
+(reserved by capture duration before detail rows):
+
+- `series`: per one-second window of capture offset (by scope end), `calls` and `selfNanos` per operation
+  (operations with no calls are absent) and `rootNanos`/`rootCalls`, the inclusive time of outermost scopes, which
+  is MagicSpells-measured wall time in that second without double counting. Scopes that end at or after the deadline
+  are not folded into the last window: `series.late` (present only when there are any) holds their `rootNanos`,
+  `rootCalls` and per-operation totals, from `fromMillis` (the deadline) up to `lastEndOffsetMillis`. Readers place
+  them in the timeline window after the deadline only when they all ended inside it.
+- `slowOperations`: the 256 longest scopes of at least 1 ms with operation, spell, detail, `depth`, start/end offsets
+  in microseconds, inclusive and self nanoseconds, server `tick`, `unfinishedAtStop` and `endedAfterDeadline`;
+  `observed`/`evicted`/`complete` as in Ignite's slow calls. Eviction does not change the provider's `complete`.
+- `counterCoverage`: `MATCH_CALLS` is `unobserved` since item matching moved to SneakyItems (whose provider counts
+  `match.calls`); its 0 is not zero matching.
+- `taskLifecycle.incompleteReasons` (empty exactly when `lifecycleComplete` is true) and `endObservedLateMillis`.
+
+Everything below from execution-3 still applies. Case-folded
 `spellKey` uses `Locale.ROOT`; `spell` retains configured internal spelling. Its
 `taskLifecycle` report reserves export space ahead of optional timing detail.
 

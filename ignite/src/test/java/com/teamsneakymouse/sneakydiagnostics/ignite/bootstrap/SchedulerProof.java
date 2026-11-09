@@ -15,7 +15,7 @@ import org.bukkit.scheduler.BukkitTask;
 /** Executes real transformed scheduler classes without starting Minecraft, worlds, or a network listener. */
 public final class SchedulerProof {
     public static void main(String[] args) throws Exception {
-        try { prove(); System.out.println("PASS Ignite scheduler hooks: sync/async/consumer/callable execution, exception preservation, cancellations, deferred attribution, and idle behavior"); System.exit(0); }
+        try { prove(); System.out.println("PASS Ignite scheduler and listener hooks: sync/async/consumer/callable execution, exception preservation, cancellations, deferred attribution, slow-call records, and idle behavior"); System.exit(0); }
         catch (Throwable e) { e.printStackTrace(); System.exit(1); }
     }
     private static void prove() throws Exception {
@@ -57,6 +57,22 @@ public final class SchedulerProof {
         Future<String> cancelled = scheduler.callSyncMethod(owner, (Callable<String>) () -> "must not run");
         check(cancelled.cancel(false), "Future cancellation failed");
         scheduler.mainThreadHeartbeat();
+        scheduler.runTask(owner, (Runnable) () -> pause(3));
+        scheduler.mainThreadHeartbeat();
+        var listened = new AtomicInteger();
+        var slowListener = new org.bukkit.plugin.RegisteredListener(new org.bukkit.event.Listener() {},
+                (listener, event) -> { listened.incrementAndGet(); pause(3); }, org.bukkit.event.EventPriority.NORMAL, owner, false);
+        slowListener.callEvent(new ProofEvent());
+        var failingListener = new org.bukkit.plugin.RegisteredListener(new org.bukkit.event.Listener() {},
+                (listener, event) -> { throw new org.bukkit.event.EventException("expected listener failure"); }, org.bukkit.event.EventPriority.HIGH, owner, false);
+        try { failingListener.callEvent(new ProofEvent()); throw new AssertionError("Listener exception was swallowed"); }
+        catch (org.bukkit.event.EventException expected) { check(expected.getMessage().equals("expected listener failure"), "Listener exception changed"); }
+        var tickEndCalls = new AtomicInteger();
+        new org.bukkit.plugin.RegisteredListener(new org.bukkit.event.Listener() {}, (listener, event) -> tickEndCalls.incrementAndGet(),
+                org.bukkit.event.EventPriority.MONITOR, owner, false)
+                .callEvent(new com.destroystokyo.paper.event.server.ServerTickEndEvent(1, 12.5, 0));
+        check(tickEndCalls.get() == 1, "Tick-end listener dispatch changed");
+        check(listened.get() == 1, "Listener instrumentation changed dispatch");
         Map<?, ?> report = (Map<?, ?>) server.invoke(name, "stop", new Object[]{"proof"}, new String[]{"java.lang.String"});
         List<?> groups = (List<?>) report.get("groups");
         check(groups.stream().map(value -> (Map<?, ?>) value).anyMatch(row -> row.get("event").equals("deferred_cancel_scan") && row.get("owner").equals("ProofPlugin")), "Deferred cancellation lost owner attribution");
@@ -65,6 +81,16 @@ public final class SchedulerProof {
         check(((Number) report.get("repeatedTaskCancellationRequests")).longValue() >= 1, "Repeated cancellation missing");
         check(((Number) report.get("inFlightAtStop")).longValue() == 0, "Unbalanced scopes");
         check(server.getAttribute(name, "Status").equals("available, idle"), "Probe did not return to idle");
+        Map<?, ?> slowExecutions = (Map<?, ?>) report.get("slowExecutions");
+        check(((List<?>) slowExecutions.get("records")).stream().map(value -> (Map<?, ?>) value).anyMatch(row -> row.get("owner").equals("ProofPlugin")
+                && ((Number) row.get("nanos")).longValue() >= 3_000_000L && row.get("thread").equals("unknown") && !row.containsKey("tick")), "Slow scheduler execution missing");
+        Map<?, ?> slowListeners = (Map<?, ?>) report.get("slowListeners");
+        check(((Number) slowListeners.get("observedInvocations")).longValue() == 3, "Listener hook did not observe all three calls");
+        check(((List<?>) slowListeners.get("records")).stream().map(value -> (Map<?, ?>) value).anyMatch(row -> row.get("owner").equals("ProofPlugin")
+                && row.get("eventClass").equals(ProofEvent.class.getName()) && row.get("priority").equals("NORMAL")), "Slow listener record missing");
+        check(((Number) ((Map<?, ?>) report.get("runningAtStop")).get("count")).longValue() == 0, "Nothing should be running at stop");
+        // Without a server there is no tick identity: the tick-end hook runs but records no interval.
+        check(((List<?>) ((Map<?, ?>) report.get("measuredTicks")).get("tick")).isEmpty(), "Measured tick recorded without a tick identity");
         // Exercise the plugin's bridge in its own classloader, with no companion classes bundled there.
         if (pluginJar != null) checkPluginBridge(pluginJar);
         benchmark(scheduler, owner, calls, server, name);
@@ -85,6 +111,15 @@ public final class SchedulerProof {
             check(((Map<?, ?>) stop.invoke(bridge, "plugin-bridge")).get("captureId").equals("plugin-bridge"), "Cross-classloader capture failed");
         }
     }
+    private static void pause(long millis) {
+        long end = System.nanoTime() + millis * 1_000_000L;
+        while (System.nanoTime() < end) Thread.onSpinWait();
+    }
+    public static final class ProofEvent extends org.bukkit.event.Event {
+        private static final org.bukkit.event.HandlerList HANDLERS = new org.bukkit.event.HandlerList();
+        @Override public org.bukkit.event.HandlerList getHandlers() { return HANDLERS; }
+        public static org.bukkit.event.HandlerList getHandlerList() { return HANDLERS; }
+    }
     private static void check(boolean condition, String message) { if (!condition) throw new AssertionError(message); }
     private static void benchmark(CraftScheduler scheduler, Plugin owner, AtomicInteger calls,
                                   javax.management.MBeanServer server, ObjectName name) throws Exception {
@@ -102,5 +137,20 @@ public final class SchedulerProof {
         server.invoke(name, "stop", new Object[]{"benchmark"}, new String[]{"java.lang.String"});
         System.out.println("INFO synthetic task-run cost: idle=" + idle / count + " ns/op, recording=" + active / count
                 + " ns/op; warm single-thread loop, excludes creation/cancellation and is not a server TPS benchmark");
+        var listener = new org.bukkit.plugin.RegisteredListener(new org.bukkit.event.Listener() {},
+                (ignored, event) -> calls.incrementAndGet(), org.bukkit.event.EventPriority.NORMAL, owner, false);
+        var event = new ProofEvent();
+        for (int i = 0; i < 20_000; i++) listener.callEvent(event);
+        begin = System.nanoTime();
+        for (int i = 0; i < count; i++) listener.callEvent(event);
+        long listenerIdle = System.nanoTime() - begin;
+        server.invoke(name, "start", new Object[]{"listener-benchmark", System.nanoTime(), 60}, new String[]{"java.lang.String", "long", "int"});
+        for (int i = 0; i < 20_000; i++) listener.callEvent(event);
+        begin = System.nanoTime();
+        for (int i = 0; i < count; i++) listener.callEvent(event);
+        long listenerActive = System.nanoTime() - begin;
+        server.invoke(name, "stop", new Object[]{"listener-benchmark"}, new String[]{"java.lang.String"});
+        System.out.println("INFO synthetic listener-call cost: idle=" + listenerIdle / count + " ns/op, recording=" + listenerActive / count
+                + " ns/op; warm single-thread loop of a trivial executor, not a server TPS benchmark");
     }
 }

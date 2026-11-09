@@ -30,7 +30,40 @@ def timeline(schema: int, slow_index: int = 2, **extra: Any) -> dict[str, Any]:
             "maxCollectionNanos": 500_000}
 
 
-def scheduler(schema: int) -> dict[str, Any]:
+def with_current_ticks(offset: int):
+    """A timeline edit: current-tick ranges = tick numbers + offset (the gap an empty-server pause leaves)."""
+    def edit(doc: dict[str, Any]) -> None:
+        for w in doc["windows"]:
+            w["firstCurrentTick"] = w["firstTick"] + offset
+            w["lastCurrentTick"] = w["lastTick"] + offset
+    return edit
+
+
+def slow_ignite() -> dict[str, Any]:
+    """Ignite slow-call records: in tick 142 (window 2) a 100 ms task with a 40 ms listener nested inside it, plus an
+    async 30 ms task ending in window 3 (no tick) and one scheduler call still running at stop."""
+    def rec(start_ms: float, dur_ms: float, **fields: Any) -> dict[str, Any]:
+        return {**fields, "startOffsetMicros": int(start_ms * 1000), "endOffsetMicros": int((start_ms + dur_ms) * 1000),
+                "nanos": int(dur_ms * 1e6), "throwing": False, "endedAfterDeadline": False}
+    return {
+        "slowExecutions": {"thresholdNanos": 1_000_000, "capacity": 512, "observed": 3, "retained": 2, "evicted": 1,
+                           "complete": False, "records": [
+                               rec(2000.0, 100.0, event="execution", owner="Gamma", taskClass="com.gamma.MenuTask",
+                                   sync=True, thread="server", tick=142),
+                               rec(3100.0, 30.0, event="execution", owner="Gamma", taskClass="com.gamma.SaveTask",
+                                   sync=False, thread="other")]},
+        "slowListeners": {"thresholdNanos": 1_000_000, "capacity": 512, "observed": 1, "retained": 1, "evicted": 0,
+                          "complete": True, "observedInvocations": 5000, "records": [
+                              rec(2030.0, 40.0, owner="Delta", listenerClass="com.delta.OpenListener",
+                                  eventClass="org.bukkit.event.inventory.InventoryOpenEvent", priority="LOWEST",
+                                  asyncEvent=False, thread="server", tick=142)]},
+        "runningAtStop": {"count": 1, "capacity": 32, "records": [
+            {"event": "execution", "owner": "Gamma", "taskClass": "com.gamma.StuckTask", "sync": False,
+             "startOffsetMicros": 4_900_000, "runningNanosAtStop": 200_000_000}]}}
+
+
+def scheduler(schema: int, slow: bool = False, gamma: bool = False) -> dict[str, Any]:
+    """``gamma`` adds a second task owner (Gamma) without a provider; ``slow`` adds Ignite slow-call records."""
     def snap(t: int, pending: int, new: int, missing: int, spells: int) -> dict[str, Any]:
         return {"observedAfterMillis": t, "pendingTasks": pending, "examinedTasks": pending, "activeWorkers": 0,
                 "examinedWorkers": 0, "truncated": False, "overflowTasks": 0, "overflowWorkers": 0,
@@ -49,7 +82,13 @@ def scheduler(schema: int) -> dict[str, Any]:
                        "groups": [{"event": "execution", "sync": True, "taskClass": "AlphaTask", "caller": "",
                                    "owner": "Alpha", "counts": {"started": 10, "completed": 10, "throwing": 0,
                                                                 "totalNanos": 50_000_000, "maxNanos": 9_000_000,
-                                                                "firstOffsetMillis": 10, "lastOffsetMillis": 4900}}]},
+                                                                "firstOffsetMillis": 10, "lastOffsetMillis": 4900}}]
+                       + ([{"event": "execution", "sync": True, "taskClass": "com.gamma.MenuTask", "caller": "",
+                            "owner": "Gamma", "counts": {"started": 4, "completed": 4, "throwing": 0,
+                                                         "totalNanos": 120_000_000, "maxNanos": 100_000_000,
+                                                         "firstOffsetMillis": 10, "lastOffsetMillis": 4900}}]
+                          if gamma or slow else []),
+                       **(slow_ignite() if slow else {})},
             "complete": True}
 
 
@@ -97,6 +136,30 @@ def probe(sections: dict[str, tuple[int, float, float]], *, series: bool = True,
             m["series"]["counts"] = {"energy.arrived": {"windows": [0, 2], "n": [2, 5]}}
             m["series"]["levels"] = {"placed": {"from": [0, 2, 4], "to": [1, 2, 4], "values": [3, 5, 3]}}
             m["series"]["omitted"] = {"counts": [], "levels": ["entities.owned"]}
+    return m
+
+
+def magicspells_v4() -> dict[str, Any]:
+    """magicspells-execution-4 additions: per-second series, slow operations, counter coverage, lifecycle reasons."""
+    m = magicspells()
+    m["series"] = {"windowMillis": 1000, "rootNanos": [1e6, 1e6, 80e6, 1e6, 1e6], "rootCalls": [5, 5, 9, 5, 5],
+                   "operations": {"event": {"calls": [4, 4, 4, 4, 4], "selfNanos": [1e6, 1e6, 2e6, 1e6, 1e6]},
+                                  "task": {"calls": [1, 1, 5, 1, 1], "selfNanos": [0, 0, 70e6, 0, 0]}}}
+    m["slowOperations"] = {"thresholdNanos": 1_000_000, "capacity": 512, "observed": 1, "retained": 1, "evicted": 0,
+                           "complete": True, "records": [
+                               {"operation": "task", "spell": "crafting2", "detail": "Task:delayed", "depth": 0,
+                                "startOffsetMicros": 2_010_000, "endOffsetMicros": 2_080_000, "nanos": 70_000_000,
+                                "selfNanos": 69_000_000, "thread": "server", "tick": 143, "unfinishedAtStop": False,
+                                "endedAfterDeadline": False}]}
+    m["counterCoverage"] = {"INVENTORY_SLOTS": "observed",
+                            "MATCH_CALLS": "unobserved: item matching moved to SneakyItems (see its match.calls)"}
+    m["taskLifecycle"] = {"inventoryComplete": False, "lifecycleComplete": False, "unknownOwnerEvents": 12,
+                          "endObservedAfterDeadline": True, "endObservedLateMillis": 39,
+                          "incompleteReasons": ["end_observed_after_deadline", "unattributed_owner_events"],
+                          "groups": [{"spell": "[unattributed]", "origin": "com.nisovin.magicspells.util.managers.X#save:1",
+                                      "registrations": 0, "executions": 10, "callbackCompletions": 0},
+                                     {"spell": "[unattributed]", "origin": "com.nisovin.magicspells.spells.targeted.Y#<init>:2",
+                                      "registrations": 1, "executions": 1, "callbackCompletions": 0}]}
     return m
 
 
@@ -156,7 +219,9 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
                extra_providers: dict[str, dict[str, Any]] | None = None, capture_id: str = CAPTURE_ID,
                provider_complete: bool = True, with_workload: bool = True, instrumentation: str = "alpha-1",
                failed_providers: tuple[str, ...] = (), gz_providers: tuple[str, ...] = (),
-               planned_index_names: bool = False) -> Path:
+               planned_index_names: bool = False, slow: bool = False, gamma: bool = False,
+               enabled: tuple[str, ...] = ("Alpha",), timeline_edit: Any = None, scheduler_edit: Any = None,
+               plugins_collector: bool = True) -> Path:
     """A v2 folder: manifest, index, per-provider files, optionally gzipped reports.
 
     ``gz_providers`` stores those providers' files compressed. The index names each file as stored, unless
@@ -178,11 +243,19 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
         return p.name
 
     cid = {"captureId": capture_id}
-    add("timeline-1.json", "timeline", {**timeline(2), **cid}, "timeline" in gz)
-    add("scheduler-1.json", "scheduler", {**scheduler(2), **cid}, "scheduler" in gz)
+    # timeline_edit/scheduler_edit: functions that change the report before it is written (and hashed)
+    tl = {**timeline(2), **cid}
+    if timeline_edit:
+        timeline_edit(tl)
+    add("timeline-1.json", "timeline", tl, "timeline" in gz)
+    sc = {**scheduler(2, slow, gamma), **cid}
+    if scheduler_edit:
+        scheduler_edit(sc)
+    add("scheduler-1.json", "scheduler", sc, "scheduler" in gz)
     add("entities-1.json", "entities", {**entities(2), **cid}, "entities" in gz)
     index_entries = []
-    all_probes = {**probes, **(extra_providers or {})}
+    # plugins_collector=False: a capture without the plugins collector (e.g. scheduler only): no index, no provider files
+    all_probes = {**probes, **(extra_providers or {})} if plugins_collector else {}
     for plugin, meas in all_probes.items():
         slug = plugin.lower()
         fname = f"plugins-{slug}-1.json"
@@ -205,12 +278,13 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
     index = {**header("plugins", 2, captureId=capture_id), "selected": "all", "providers": index_entries,
              "incompleteProviders": [e["plugin"] for e in index_entries if not e["complete"]],
              "complete": not failed_providers, "notes": "x"}
-    add("plugins-1.json", "plugins", index, False)
+    if plugins_collector:
+        add("plugins-1.json", "plugins", index, False)
     manifest: dict[str, Any] = {
         "schemaVersion": 2, "captureId": capture_id, "captureStartedAt": START, "requestedDurationSeconds": 5,
         "updatedAt": "2026-01-01T12:00:07Z",
         "server": {"version": "Paper test", "javaVersion": "25", "diagnosticsVersion": "2026.01.01-abc",
-                   "plugins": [{"name": "Alpha", "version": "1.0"}]},
+                   "plugins": [{"name": name, "version": "1.0"} for name in enabled]},
         "workload": {"atStart": {"players": players, "worlds": [
             {"name": "world", "loadedChunks": chunks, "entities": entity_total}]}, "atEnd": None}
         if with_workload else None,

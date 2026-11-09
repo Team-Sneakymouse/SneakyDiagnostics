@@ -7,7 +7,8 @@ from typing import Any
 
 from .correlate import correlate
 from .loader import Capture
-from .providers import analyze_provider
+from .coverage import analyze_coverage
+from .providers import analyze_provider, slow_records
 from .util import ms, num, pct, scan_flags, top
 
 STANDARD_COLLECTORS = ("timeline", "scheduler", "entities", "plugins", "spark", "connections")
@@ -39,6 +40,7 @@ def analyze(cap: Capture, opts: Options | None = None) -> dict[str, Any]:
         "options": {"top": opts.top, "slowMs": opts.slow_ms, "topWindows": opts.top_windows},
     }
     result["correlation"] = correlate(cap, timeline, result["scheduler"], opts)
+    result["coverage"] = analyze_coverage(cap, providers, cap.report("scheduler"))
     return result
 
 
@@ -84,7 +86,8 @@ def analyze_timeline(cap: Capture) -> dict[str, Any] | None:
     rows = [{"index": int(num(w.get("fromMillis")) // window_ms), "fromMillis": w.get("fromMillis"),
              "toMillis": w.get("toMillis"), "ticks": num(w.get("ticks")), "meanMspt": round(num(w.get("meanMspt")), 2),
              "maxMspt": round(num(w.get("maxMspt")), 2), "over50ms": num(w.get("over50ms")),
-             "over100ms": num(w.get("over100ms")), "firstTick": w.get("firstTick"), "lastTick": w.get("lastTick")}
+             "over100ms": num(w.get("over100ms")), "firstTick": w.get("firstTick"), "lastTick": w.get("lastTick"),
+             "firstCurrentTick": w.get("firstCurrentTick"), "lastCurrentTick": w.get("lastCurrentTick")}
             for w in wins]
     weighted = sum(num(w.get("ticks")) * num(w.get("meanMspt")) for w in wins) / ticks if ticks else None
     return {
@@ -164,6 +167,9 @@ def _pending_by_plugin(snapshot: dict[str, Any]) -> dict[str, dict[str, int]]:
     return out
 
 
+OLD_COMPANION = "not recorded (Ignite companion before slow-call records)"
+
+
 def analyze_ignite(ig: dict[str, Any], n: int) -> dict[str, Any]:
     groups = [g for g in ig.get("groups", []) if isinstance(g, dict) and isinstance(g.get("counts"), dict)]
     agg: dict[tuple[str, str, bool], dict[str, float]] = {}
@@ -196,6 +202,9 @@ def analyze_ignite(ig: dict[str, Any], n: int) -> dict[str, Any]:
         "byOwnerEvent": strip(top(by_owner, "_t", n * 2)),
         "topExecutionGroups": strip(top([r for r in rows if r["event"] == "execution"], "_t", n)),
         "topDeferredCancelScans": strip(top([r for r in rows if r["event"] == "deferred_cancel_scan"], "_t", 5)),
+        "slowExecutions": slow_records(ig.get("slowExecutions"), n, missing=OLD_COMPANION),
+        "slowListeners": slow_records(ig.get("slowListeners"), n, missing=OLD_COMPANION),
+        "runningAtStop": ig.get("runningAtStop") if isinstance(ig.get("runningAtStop"), dict) else None,
         "note": ("Ignite timings are inclusive wall time per group. Within one event kind and thread kind, "
                  "sums per owner are comparable; async executions run on workers and can exceed capture time; "
                  "creation/cancellation/deferred-scan timings overlap executions and must not be added to them."),

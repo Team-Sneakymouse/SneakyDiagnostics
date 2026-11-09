@@ -6,9 +6,22 @@ import org.objectweb.asm.tree.MethodInsnNode;
 /** A release is compatible when these method/field/call-path contracts remain intact. */
 public final class SchedulerContract {
     private static final String PREFIX = "org/bukkit/craftbukkit/scheduler/";
+    /** Paper dispatches every plugin listener through this class (PaperEventManager.callEvent). */
+    public static final String LISTENER = "org/bukkit/plugin/RegisteredListener";
     private SchedulerContract() {}
 
     public static void verify(ClassNode node) {
+        if (node.name.equals(LISTENER)) {
+            method(node, "callEvent", "(Lorg/bukkit/event/Event;)V");
+            boolean executes = false;
+            for (var instruction : method(node, "callEvent", "(Lorg/bukkit/event/Event;)V").instructions) {
+                if (instruction instanceof MethodInsnNode call && call.owner.equals("org/bukkit/plugin/EventExecutor")
+                        && call.name.equals("execute") && call.desc.equals("(Lorg/bukkit/event/Listener;Lorg/bukkit/event/Event;)V")) executes = true;
+            }
+            require(executes, node, "callEvent must still invoke EventExecutor.execute");
+            return;
+        }
+        if (!node.name.startsWith(PREFIX)) throw new IllegalStateException("Unexpected scheduler target " + node.name);
         switch (node.name.substring(PREFIX.length())) {
             case "CraftScheduler" -> {
                 method(node, "<init>", "(Z)V");
