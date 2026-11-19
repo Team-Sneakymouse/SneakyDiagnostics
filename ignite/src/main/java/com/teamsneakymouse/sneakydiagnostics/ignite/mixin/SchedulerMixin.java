@@ -3,6 +3,7 @@ package com.teamsneakymouse.sneakydiagnostics.ignite.mixin;
 import com.llamalad7.mixinextras.injector.wrapmethod.WrapMethod;
 import com.llamalad7.mixinextras.injector.wrapoperation.Operation;
 import com.teamsneakymouse.sneakydiagnostics.ignite.probe.SchedulerControl;
+import com.teamsneakymouse.sneakydiagnostics.ignite.probe.ServerControl;
 import com.teamsneakymouse.sneakydiagnostics.ignite.probe.SchedulerProbe;
 import com.teamsneakymouse.sneakydiagnostics.ignite.probe.TaskDetails;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,7 +21,7 @@ abstract class SchedulerMixin {
     @Shadow @Final private ConcurrentHashMap<Integer, BukkitTask> runners;
 
     @Inject(method = "<init>(Z)V", at = @At("RETURN"), require = 1, allow = 1)
-    private void diagnostics$initialize(boolean async, CallbackInfo callback) { SchedulerControl.initialize(); }
+    private void diagnostics$initialize(boolean async, CallbackInfo callback) { SchedulerControl.initialize(); ServerControl.initialize(); }
 
     @WrapMethod(method = "cancelTask(I)V", require = 1, allow = 1)
     private void diagnostics$cancelTask(int id, Operation<Void> original) {

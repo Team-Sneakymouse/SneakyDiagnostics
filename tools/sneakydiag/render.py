@@ -52,6 +52,7 @@ def render(r: dict[str, Any]) -> str:
     for p in r["providers"]:
         o.extend(_provider(p))
     o.extend(_scheduler(r["scheduler"]))
+    o.extend(_tracker(r.get("tracker")))
     o.extend(_entities(r["entities"]))
     o.extend(_spark(r["spark"]))
     o.extend(_correlation(r["correlation"]))
@@ -301,6 +302,39 @@ def _scheduler(s: dict[str, Any] | None) -> list[str]:
     return o
 
 
+def _tracker(t: dict[str, Any] | None) -> list[str]:
+    o = _head("Tracker sends (packets-1.json)")
+    if t is None:
+        return o + ["  no packets report: tracker send time not captured"]
+    o.append(f"  reason={t['reason']} complete={t['complete']}  Ignite: {t['igniteAvailability']}")
+    if not t["available"]:
+        o.append("  " + t["note"])
+        if t.get("igniteError"):
+            o.append(f"  error: {t['igniteError']}")
+        return o
+    o.append(f"  OBSERVATION {t['calls']:,.0f} sends of {t['entities']:,.0f} entities over {t['observedMillis'] / 1000:g}s: "
+             f"{t['totalMs']} ms ({t['pctOfObservedWall']}% of observed wall time); metadata {t['metadataMs']} ms, "
+             f"other {t['otherMs']} ms")
+    if t["coverageFlags"] or t["problems"]:
+        o.append("  GAP " + ", ".join(t["coverageFlags"] + t["problems"]))
+    if t["peakWindow"]:
+        pw = t["peakWindow"]
+        o.append(f"  busiest second: window {pw['window']} with {pw['ms']} ms (median window {pw['medianMs']} ms)")
+    o.append("  by entity type x owner hint (inclusive send time; metadata is part of total):")
+    o += table(t["topGroups"], [("entityType", "type"), ("owner", "owner hint"), ("entities", "entities"),
+                                ("calls", "sends"), ("totalMs", "total ms"), ("metadataMs", "metadata ms"),
+                                ("sharePct", "%"), ("meanUs", "mean us"), ("maxMs", "max ms"),
+                                ("p99MsUpper", "p99 ms<=")], "    ")
+    o.append("  by entity type:")
+    o += table(t["byType"], [("entityType", "type"), ("entities", "entities"), ("calls", "sends"),
+                             ("totalMs", "total ms"), ("metadataMs", "metadata ms"), ("sharePct", "%")], "    ")
+    o.append("  by owner hint:")
+    o += table(t["byOwner"], [("owner", "owner hint"), ("entities", "entities"), ("calls", "sends"),
+                              ("totalMs", "total ms"), ("metadataMs", "metadata ms"), ("sharePct", "%")], "    ")
+    o.append("  " + t["note"])
+    return o
+
+
 def _entities(e: dict[str, Any] | None) -> list[str]:
     o = _head("Entity census")
     if e is None:
@@ -407,6 +441,11 @@ def _correlation(c: dict[str, Any]) -> list[str]:
                          + f" by {t['calls']} calls; longest: " + "; ".join(t["longest"]))
             o += table(sl["calls"], [("source", "source"), ("label", "call"), ("ms", "ms"), ("startMs", "start ms"),
                                      ("endMs", "end ms"), ("tick", "tick"), ("thread", "thread")], "      ")
+        tw = w.get("tracker")
+        if tw:
+            gl = "; ".join(f"{g['entityType']} {g['owner']} {g['ms']} ms" for g in tw["groups"]) or "no series groups"
+            o.append(f"    tracker sends: {tw['ms']} ms ({tw['pctOfWindowTickTime']}% of tick time) over {tw['calls']:,.0f} "
+                     f"sends; largest: {gl}")
         sc = w["scheduler"]
         if sc.get("note"):
             o.append("    scheduler: " + sc["note"])
@@ -438,6 +477,12 @@ def _leads(r: dict[str, Any]) -> list[str]:
         t = s["pendingByPlugin"][0]
         o.append(f"  - Scheduler: {t['plugin']} has the most sync-pending tasks (max {t['syncMax']:,.0f}); a large "
                  "queue alone does not show per-tick cost or a leak.")
+    t = r.get("tracker")
+    if t and t.get("available") and t["topGroups"]:
+        g = t["topGroups"][0]
+        o.append(f"  - Tracker: {g['entityType']} with owner hint '{g['owner']}' has the largest send time ({g['totalMs']} ms, "
+                 f"{g['sharePct']}% of tracker sends; metadata {g['metadataMs']} ms). Sends cost even when unchanged; "
+                 "test with a controlled change and diff_captures.py.")
     e = r["entities"]
     if e and e["ownerHintsByCount"]:
         k, v = next(iter(e["ownerHintsByCount"].items()))

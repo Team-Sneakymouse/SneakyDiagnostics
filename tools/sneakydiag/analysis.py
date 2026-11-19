@@ -9,9 +9,10 @@ from .correlate import correlate
 from .loader import Capture
 from .coverage import analyze_coverage
 from .providers import analyze_provider, slow_records
+from .tracker import analyze_tracker
 from .util import ms, num, pct, scan_flags, top
 
-STANDARD_COLLECTORS = ("timeline", "scheduler", "entities", "plugins", "spark", "connections")
+STANDARD_COLLECTORS = ("timeline", "scheduler", "packets", "entities", "plugins", "spark", "connections")
 
 
 @dataclass
@@ -34,6 +35,7 @@ def analyze(cap: Capture, opts: Options | None = None) -> dict[str, Any]:
         "timeline": timeline,
         "providers": providers,
         "scheduler": analyze_scheduler(cap, opts.top),
+        "tracker": analyze_tracker(cap, opts.top),
         "entities": analyze_entities(cap, opts.top),
         "spark": analyze_spark_meta(cap),
         "connections": analyze_connections(cap),

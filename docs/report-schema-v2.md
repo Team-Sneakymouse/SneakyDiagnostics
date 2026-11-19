@@ -6,6 +6,8 @@ report written by this release carries `"schemaVersion": 2` in its header. Tools
 v2 and tell them apart by that field. The layouts of `entities`, `timeline`, `scheduler`,
 `spark` and `connections` reports are unchanged apart from compression and the compatible additions
 listed under [Tick identity](#tick-identity) and [Scheduler: Ignite slow calls](#scheduler-ignite-slow-calls).
+`packets-1.json` is a compatible addition (2026-11, see [`packets-1.json`](#packets-1json-tracker-sends)); captures
+without it are read as "not captured".
 
 ## Tick identity
 
@@ -40,7 +42,8 @@ reports/<capture-id>/
   manifest.json                    capture index, rewritten after every file (never compressed)
   plugins-1.json                   collector index: one entry per provider, no measurements
   plugins-<provider>-1.json        one file per participating provider: its measurements
-  timeline-1.json[.gz]  entities-<n>.json[.gz]  scheduler-1.json[.gz]  connections-1.json  spark-1.json  profile.sparkprofile
+  timeline-1.json[.gz]  entities-<n>.json[.gz]  scheduler-1.json[.gz]  packets-1.json[.gz]  connections-1.json
+  spark-1.json  profile.sparkprofile
 ```
 
 - `<provider>` is the lowercased plugin name with every character outside `[a-z0-9._-]`
@@ -205,6 +208,51 @@ Compatible additions to `scheduler-1.json`'s `ignite` map (bridge protocol stays
   `igniteComplete`.
 - Listener records time one listener's executor call, including nested events; scheduler records include listeners
   their task triggers. Records overlap each other and provider sections: sum only their union per thread.
+
+## `packets-1.json` (tracker sends)
+
+Collector `packets` (`/diagnostics packets start [seconds]`, included in `all`, permission
+`sneakydiagnostics.packets`). Today it holds only the entity tracker's send time, measured by the Ignite companion
+through a second bridge, `com.teamsneakymouse.sneakydiagnostics:type=ServerProbe` (protocol 1); the scheduler bridge
+is unchanged. Outbound/inbound packet counts may be added to this file later as compatible additions.
+
+Standard header plus `startedAt`, `igniteAvailability`, `errors`, `notes`, optionally `igniteError`, and:
+
+```json
+"tracker": {
+  "observedMillis": 60000, "calls": 1200000, "totalNanos": 0, "metadataCalls": 0, "metadataNanos": 0,
+  "entities": 37000, "offThreadCalls": 0, "lateCalls": 0, "labelErrors": 0, "maxGroups": 512,
+  "overflowEntities": 0, "complete": true,
+  "groups": [ { "entityType": "ITEM_DISPLAY", "owner": "pdc:sneakygrounditems", "entities": 10468, "calls": 0,
+                "totalNanos": 0, "metadataCalls": 0, "metadataNanos": 0, "maxNanos": 0, "histogramLog2": [0] } ],
+  "series": { "windowMillis": 1000, "calls": [0], "nanos": [0],
+              "groups": [ { "entityType": "ITEM_DISPLAY", "owner": "pdc:sneakygrounditems", "nanos": [0] } ] }
+}
+```
+
+- **What is timed:** server-thread wall time inside `ServerEntity.sendChanges`, the tracker's per-tick send for one
+  tracked entity (movement, rotation, passengers, velocity, item-frame map updates and changed metadata).
+  `metadataNanos` is the nested `sendDirtyEntityData` part and is included in `totalNanos`. The player checks
+  (`TrackedEntity.updatePlayer`) and the tracker's loop over entities are **not** included. Each send's time includes
+  the probe's own two clock reads.
+- **Groups:** one per Bukkit entity type (upper case, like the census) and owner hint, resolved once per entity per
+  capture and cached. Owner hint: `(player)` for a connected player (exactly `ServerPlayer`), `class:<name>` for a
+  non-Minecraft entity class (plugin NPCs such as Citizens), otherwise the entity's sorted PDC namespaces
+  (`pdc:a,pdc:b`, as in the census), else `(none)`. Hints are candidates, not proven ownership; a PDC change after the
+  first send is not reflected. `entities` counts distinct tracker entries seen; `groups` is sorted by `totalNanos`.
+- **Bounds:** at most 512 groups; entities beyond that go to the `(overflow)` group and are counted in
+  `overflowEntities`. Labels are capped at 192 characters. A label that cannot be read becomes `(unknown)` and counts
+  in `labelErrors`.
+- **Coverage:** `complete` (in `tracker`) is false when `overflowEntities`, `labelErrors` or `offThreadCalls` is
+  non-zero. `offThreadCalls` are sends seen on another thread: counted (approximately), not timed. `lateCalls` ended
+  after the requested deadline and are left out without affecting `complete`. The report's own `complete` also needs
+  reason `completed` and no `igniteError`.
+- **Histogram and series:** `histogramLog2` uses the shared-probe buckets. Series windows are
+  `[i*1000, (i+1)*1000)` ms of capture offset by a send's **end**, aligned with the timeline; `calls`/`nanos` cover
+  all groups, `series.groups` the 16 groups with the largest `totalNanos` (a group with no sends in any window is left
+  out). Windows with no sends are 0.
+- **No `tracker` key** (companion missing, older than this probe, or failed): tracker send time is unmeasured, not
+  zero, and the report is incomplete.
 
 ## `manifest.json`
 

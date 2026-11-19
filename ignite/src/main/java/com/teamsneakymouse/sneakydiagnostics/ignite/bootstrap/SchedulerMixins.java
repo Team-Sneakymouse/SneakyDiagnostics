@@ -6,7 +6,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
 import org.spongepowered.asm.mixin.extensibility.IMixinInfo;
 
-/** Selects Paper before target discovery and verifies structural contracts (scheduler and listener dispatch), not release numbers. */
+/** Selects Paper before target discovery and verifies structural contracts (scheduler, listener dispatch, tracker sends), not release numbers. */
 public final class SchedulerMixins implements IMixinConfigPlugin {
     private boolean active;
     @Override public void onLoad(String mixinPackage) {
@@ -28,12 +28,23 @@ public final class SchedulerMixins implements IMixinConfigPlugin {
                 new org.objectweb.asm.ClassReader(input).accept(node, 0);
                 SchedulerContract.verify(node);
             } catch (java.io.IOException e) { throw new IllegalStateException("Cannot verify listener target", e); }
+            for (String name : List.of(TrackerContract.SERVER_ENTITY, TrackerContract.CHUNK_MAP)) {
+                try (var input = loader.getResourceAsStream(name + ".class")) {
+                    if (input == null) throw new IllegalStateException("Missing tracker target: " + name);
+                    var node = new ClassNode();
+                    new org.objectweb.asm.ClassReader(input).accept(node, 0);
+                    TrackerContract.verify(node);
+                } catch (java.io.IOException e) { throw new IllegalStateException("Cannot verify tracker target: " + name, e); }
+            }
         }
     }
     @Override public String getRefMapperConfig() { return null; }
     @Override public boolean shouldApplyMixin(String target, String mixin) { return active; }
     @Override public void acceptTargets(Set<String> mine, Set<String> others) { }
-    @Override public List<String> getMixins() { return active ? List.of("SchedulerMixin", "TaskMixin", "FutureMixin", "ListenerMixin") : List.of(); }
-    @Override public void preApply(String target, ClassNode node, String mixin, IMixinInfo info) { SchedulerContract.verify(node); }
+    @Override public List<String> getMixins() { return active ? List.of("SchedulerMixin", "TaskMixin", "FutureMixin", "ListenerMixin", "ServerEntityMixin") : List.of(); }
+    @Override public void preApply(String target, ClassNode node, String mixin, IMixinInfo info) {
+        if (TrackerContract.covers(node.name)) TrackerContract.verify(node);
+        else SchedulerContract.verify(node);
+    }
     @Override public void postApply(String target, ClassNode node, String mixin, IMixinInfo info) { }
 }

@@ -44,6 +44,10 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
   Other free-form providers (Voice) list their scalar fields and every `{totalNanos, samples}` timer found, with queue/delay timers labelled as waiting time.
 - **Scheduler**: pending-task range and per-plugin pending, snapshot churn, truncation/overflow, snapshot collection overhead, and Ignite groups by owner x event x
   thread kind (inclusive wall time).
+- **Tracker sends** (`packets-1.json`): entity-tracker send time (`ServerEntity.sendChanges`) by entity type x owner hint,
+  by type and by owner, with the metadata part, sends per entity, mean, max and p99 bucket bound, and the busiest second.
+  Player checks are not included. A report without a `tracker` section (no companion) is shown as unmeasured, not zero;
+  window correlation shows each slow window's tracker send time and its largest groups.
 - **Entity census**: segment-combined counts by type and owner hint, tracked-subscription groups, per-world coverage (unreached worlds are unknown, not zero).
 - **Window correlation**: the worst timeline windows (max tick at or above `--slow-ms`, default 100; `--top-windows`, default 10), and for each the provider
   sections active in that window (from `series`, with a multiple of that section's median window), the scheduler snapshots that fell in it with the largest

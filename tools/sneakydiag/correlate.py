@@ -5,6 +5,7 @@ import bisect
 from typing import Any
 
 from .loader import Capture
+from .tracker import tracker_window
 from .providers import key_series, level_at, level_median, magicspells_series, median, series_windows
 from .util import ms, num, pct
 
@@ -56,6 +57,7 @@ def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str
         entry = _window(w, probes, snaps, scheduler)
         entry["magicSpells"] = [_spells_in_window(p, mss, w) for p, mss in spells]
         entry["slowCalls"] = _calls_in_window(calls, w, ticks, measured)
+        entry["tracker"] = tracker_window(cap, w["fromMillis"], w["ticks"] * w["meanMspt"])
         out["windows"].append(entry)
     return out
 

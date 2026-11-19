@@ -214,6 +214,37 @@ def v1_capture(root: Path, name: str = "v1", *, providers: list[dict[str, Any]] 
     return d
 
 
+def packets(available: bool = True, **tracker_extra: Any) -> dict[str, Any]:
+    """packets-1.json with a tracker section: displays send in every window, the NPC group spikes in window 2."""
+    doc = {**header("packets", 2), "startedAt": START, "igniteAvailability": "Ignite available, idle", "errors": 0,
+           "notes": "x"}
+    if not available:
+        return {**doc, "igniteAvailability": "unavailable (companion not installed)", "complete": False}
+
+    def group(etype: str, owner: str, ents: int, calls: int, nanos: int, meta: int, max_n: int) -> dict[str, Any]:
+        hist = [0] * 41
+        hist[12] = calls  # 4096..8191 ns
+        return {"entityType": etype, "owner": owner, "entities": ents, "calls": calls, "totalNanos": nanos,
+                "metadataCalls": calls // 2, "metadataNanos": meta, "maxNanos": max_n, "histogramLog2": hist}
+
+    groups = [group("PLAYER", "class:net.citizensnpcs.EntityHumanNPC", 2, 200, 9_000_000, 1_000_000, 900_000),
+              group("ITEM_DISPLAY", "pdc:sneakygrounditems", 100, 1000, 6_000_000, 4_000_000, 50_000),
+              group("ZOMBIE", "(none)", 5, 100, 1_000_000, 0, 20_000)]
+    npc = [1_000_000, 1_000_000, 5_000_000, 1_000_000, 1_000_000, 0]
+    disp = [1_200_000] * 5 + [0]
+    zomb = [200_000] * 5 + [0]
+    tracker = {"observedMillis": 5000, "calls": 1300, "totalNanos": 16_000_000, "metadataCalls": 650,
+               "metadataNanos": 5_000_000, "entities": 107, "offThreadCalls": 0, "lateCalls": 0, "labelErrors": 0,
+               "maxGroups": 512, "overflowEntities": 0, "complete": True, "groups": groups,
+               "series": {"windowMillis": 1000, "calls": [260] * 5 + [0],
+                          "nanos": [a + b + c for a, b, c in zip(npc, disp, zomb)],
+                          "groups": [{"entityType": "PLAYER", "owner": "class:net.citizensnpcs.EntityHumanNPC", "nanos": npc},
+                                     {"entityType": "ITEM_DISPLAY", "owner": "pdc:sneakygrounditems", "nanos": disp},
+                                     {"entityType": "ZOMBIE", "owner": "(none)", "nanos": zomb}]}}
+    tracker.update(tracker_extra)
+    return {**doc, "tracker": tracker}
+
+
 def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total: int = 1000, chunks: int = 500,
                gz: tuple[str, ...] = ("timeline",), probes: dict[str, dict[str, Any]] | None = None,
                extra_providers: dict[str, dict[str, Any]] | None = None, capture_id: str = CAPTURE_ID,
@@ -221,7 +252,7 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
                failed_providers: tuple[str, ...] = (), gz_providers: tuple[str, ...] = (),
                planned_index_names: bool = False, slow: bool = False, gamma: bool = False,
                enabled: tuple[str, ...] = ("Alpha",), timeline_edit: Any = None, scheduler_edit: Any = None,
-               plugins_collector: bool = True) -> Path:
+               plugins_collector: bool = True, packets_report: dict[str, Any] | None = None) -> Path:
     """A v2 folder: manifest, index, per-provider files, optionally gzipped reports.
 
     ``gz_providers`` stores those providers' files compressed. The index names each file as stored, unless
@@ -253,6 +284,8 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
         scheduler_edit(sc)
     add("scheduler-1.json", "scheduler", sc, "scheduler" in gz)
     add("entities-1.json", "entities", {**entities(2), **cid}, "entities" in gz)
+    if packets_report is not None:
+        add("packets-1.json", "packets", {**packets_report, **cid}, "packets" in gz)
     index_entries = []
     # plugins_collector=False: a capture without the plugins collector (e.g. scheduler only): no index, no provider files
     all_probes = {**probes, **(extra_providers or {})} if plugins_collector else {}
