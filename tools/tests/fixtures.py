@@ -108,6 +108,61 @@ def with_spawns(natural: bool = False):
     return edit
 
 
+def phases_report(*, available: bool = True, spawn_chunks: bool = False, entities_slow_us: int = 60_000,
+                  world: str = "world.main", **extra: Any) -> dict[str, Any]:
+    """phases-1.json (2026-11): three ticks per timeline window (current ticks 100+20i .. 102+20i), one world (a name with
+    a dot). Entities spike in window 2. createState (mob-cap bookkeeping) runs every tick; ``spawn_chunks`` adds
+    spawnForChunk time with entities attempted. The last tick has no measured duration (the stop interrupted it)."""
+    doc = header("phases", 2, **extra)
+    if not available:
+        doc.update({"igniteAvailability": "unavailable (companion not installed)", "available": False,
+                    "unavailableReason": "Tick phases need the Ignite companion: unavailable (companion not installed)",
+                    "phasesComplete": False, "errors": 0, "complete": False})
+        return doc
+    lvl = f"level.{world}."
+    base = {"tick-start-tasks": 1_000, "scheduler": 2_000, "diagnostics": 500, "connections": 2_000,
+            lvl + "entities": 10_000, lvl + "chunks": 1_200, lvl + "tracker": 3_000, lvl + "spawning.state": 1_500,
+            lvl + "other": 400}
+    if spawn_chunks:
+        base[lvl + "spawning.spawn"] = 800
+    ticks, starts, measured, other = [], [], [], []
+    cols: dict[str, list[int]] = {k: [] for k in base}
+    outside = {"tick-end": [], "diagnostics": []}
+    for i in range(5):
+        for j in range(3):
+            ticks.append(100 + 20 * i + j)
+            starts.append(i * 1_000_000 + j * 300_000)
+            row = dict(base)
+            if i == 2:
+                row[lvl + "entities"] = entities_slow_us
+            for k in cols:
+                cols[k].append(row[k])
+            last = i == 4 and j == 2
+            measured.append(None if last else sum(row.values()) + 1_000)
+            other.append(None if last else 1_000)
+            outside["tick-end"].append(300)
+            outside["diagnostics"].append(200)
+    totals = {k: {"totalNanos": sum(v) * 1000, "calls": len(v), "ticksWithTime": len(v), "maxTickMicros": max(v),
+                  "insideMeasuredTick": True} for k, v in cols.items()}
+    totals.update({"outside." + k: {"totalNanos": sum(v) * 1000, "calls": len(v), "ticksWithTime": len(v),
+                                    "maxTickMicros": max(v), "insideMeasuredTick": False} for k, v in outside.items()})
+    doc.update({
+        "igniteAvailability": "Ignite phases available, idle", "available": True, "schema": "sneakydiagnostics.phases/1",
+        "phasesComplete": True, "errors": 0, "complete": True,
+        "ticks": {"tick": ticks, "startOffsetMicros": starts, "measuredMicros": measured, "count": len(ticks),
+                  "capacity": 200, "dropped": 0},
+        "phases": cols, "other": other, "outside": outside, "totals": totals,
+        "measured": {"measuredTicks": 14, "unmeasuredTicks": 1, "measuredNanos": sum(m for m in measured if m) * 1000,
+                     "otherMicros": 14_000, "negativeOtherTicks": 0},
+        "worlds": [world], "omittedWorlds": [], "omittedWorldCalls": 0, "omittedSeries": [],
+        "spawning": {world: {"stateCalls": 15, "spawnChunkCalls": 30 if spawn_chunks else 0,
+                             "spawnChunkCallsThatSpawned": 4 if spawn_chunks else 0,
+                             "naturalSpawnAttempts": 5 if spawn_chunks else 0, "customSpawnerCalls": 0}},
+        "depthOverflow": 0, "nestingErrors": 0, "spanningTicks": 0, "lastTickPartial": True,
+        "limits": {"ticksPerSecond": 40, "worlds": 64, "depth": 32, "values": 8_000_000}, "notes": "fixture"})
+    return doc
+
+
 def census_budget(doc: dict[str, Any]) -> None:
     """An entities edit: the wall-clock census budget fields (2026-11)."""
     doc.update({"budgetMillisPerSecond": 50, "budgetExhaustedTicks": 3, "visitOrder": "players-first"})
@@ -272,7 +327,7 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
                failed_providers: tuple[str, ...] = (), gz_providers: tuple[str, ...] = (),
                planned_index_names: bool = False, slow: bool = False, gamma: bool = False,
                enabled: tuple[str, ...] = ("Alpha",), timeline_edit: Any = None, scheduler_edit: Any = None,
-               plugins_collector: bool = True, entities_edit: Any = None) -> Path:
+               plugins_collector: bool = True, entities_edit: Any = None, phases: dict[str, Any] | None = None) -> Path:
     """A v2 folder: manifest, index, per-provider files, optionally gzipped reports.
 
     ``gz_providers`` stores those providers' files compressed. The index names each file as stored, unless
@@ -307,6 +362,8 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
     if entities_edit:
         entities_edit(en)
     add("entities-1.json", "entities", en, "entities" in gz)
+    if phases is not None:  # a phases-1.json (2026-11), e.g. phases_report()
+        add("phases-1.json", "phases", {**phases, **cid}, "phases" in gz)
     index_entries = []
     # plugins_collector=False: a capture without the plugins collector (e.g. scheduler only): no index, no provider files
     all_probes = {**probes, **(extra_providers or {})} if plugins_collector else {}

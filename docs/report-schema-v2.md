@@ -7,7 +7,8 @@ v2 and tell them apart by that field. The layouts of `entities`, `timeline`, `sc
 `spark` and `connections` reports are unchanged apart from compression and the compatible additions
 listed under [Tick identity](#tick-identity), [Scheduler: Ignite slow calls](#scheduler-ignite-slow-calls),
 [Scheduler: Ignite listener totals](#scheduler-ignite-listener-totals), [Timeline: spawns](#timeline-spawns) and
-[Entities: census budget](#entities-census-budget).
+[Entities: census budget](#entities-census-budget). [Tick phases](#tick-phases-phases-1json) (`phases-1.json`) is a new
+collector file, also a compatible addition.
 
 ## Tick identity
 
@@ -42,7 +43,8 @@ reports/<capture-id>/
   manifest.json                    capture index, rewritten after every file (never compressed)
   plugins-1.json                   collector index: one entry per provider, no measurements
   plugins-<provider>-1.json        one file per participating provider: its measurements
-  timeline-1.json[.gz]  entities-<n>.json[.gz]  scheduler-1.json[.gz]  connections-1.json  spark-1.json  profile.sparkprofile
+  timeline-1.json[.gz]  entities-<n>.json[.gz]  scheduler-1.json[.gz]  phases-1.json[.gz]  connections-1.json  spark-1.json
+  profile.sparkprofile
 ```
 
 - `<provider>` is the lowercased plugin name with every character outside `[a-z0-9._-]`
@@ -286,6 +288,76 @@ Compatible additions to `entities-<n>.json` (2026-11):
   targets and caps; they now report the values at the largest slice (10 ms, 1,000 entities, 40 chunks: caps scale
   with the slice target at 100 entities and 4 chunks per millisecond). `limits.budgetMillisPerSecond` repeats the budget.
 - Census files without these fields used a fixed 2 ms per tick and world order.
+
+## Tick phases: `phases-1.json`
+
+New collector file (2026-11, compatible addition; `/diagnostics phases start [seconds]`, included in `all`). It needs
+the Ignite companion's `ServerProbe` MBean (protocol 1). Captures without the file did not run the collector: readers
+report tick phases as "not recorded", never as zero. Standard header plus:
+
+```json
+{ "igniteAvailability": "Ignite phases available, idle", "available": true, "schema": "sneakydiagnostics.phases/1",
+  "phasesComplete": true, "errors": 0, "complete": true,
+  "ticks": { "tick": [246999], "startOffsetMicros": [52310000], "measuredMicros": [51000],
+             "count": 1, "capacity": 2400, "dropped": 0 },
+  "phases": { "tick-start-tasks": [1200], "scheduler": [9000], "diagnostics": [2100], "connections": [4000],
+              "level.world.entities": [21000], "level.world.chunks": [2500], "level.world.tracker": [6000],
+              "level.world.block-entities": [300], "level.world.block-events": [10],
+              "level.world.spawning.state": [1500], "level.world.other": [800] },
+  "other": [2590],
+  "outside": { "tick-end": [700], "diagnostics": [350] },
+  "totals": { "scheduler": { "totalNanos": 9000400, "calls": 1, "ticksWithTime": 1, "maxTickMicros": 9000,
+                             "insideMeasuredTick": true },
+              "outside.tick-end": { "...": 0 } },
+  "measured": { "measuredTicks": 1, "unmeasuredTicks": 0, "measuredNanos": 51000000, "otherMicros": 2590,
+                "negativeOtherTicks": 0 },
+  "worlds": ["world"], "omittedWorlds": [], "omittedWorldCalls": 0, "omittedSeries": [],
+  "spawning": { "world": { "stateCalls": 1, "spawnChunkCalls": 0, "spawnChunkCallsThatSpawned": 0,
+                           "naturalSpawnAttempts": 0, "customSpawnerCalls": 0 } },
+  "depthOverflow": 0, "nestingErrors": 0, "spanningTicks": 0, "lastTickPartial": false,
+  "limits": { "ticksPerSecond": 40, "worlds": 64, "depth": 32, "values": 8000000 } }
+```
+
+- **Rows:** one per server tick, keyed by the current tick (`Bukkit.getCurrentTick()`, matched by the timeline's
+  `firstCurrentTick..lastCurrentTick`, see [Tick identity](#tick-identity)). Recording starts with the first tick after
+  the start and opens no row after the deadline. `startOffsetMicros` is the row's start (capture offset). Every list in
+  `phases`, `outside` and `other` is aligned with `ticks.tick`.
+- **Phase values** are exclusive server-thread wall time in whole microseconds (floor): a nested phase is subtracted
+  from its parent, so the phases of a tick add up. Phases: `tick-start-tasks` (inbound packets and queued tasks at tick
+  start), `scheduler` (Bukkit main-thread heartbeat), `connections` (player connection ticks, which include player
+  entity ticks), `diagnostics` (SneakyDiagnostics' own listener and scheduler-task calls: census slices, scheduler
+  snapshots, timeline sampling), and per world `level.<world>.<kind>` with kinds `entities`, `chunks` (minus tracker and
+  spawning), `tracker` (Moonrise entity tracker), `block-entities`, `block-events`, `spawning.state`
+  (`NaturalSpawner.createState`, mob-cap bookkeeping), `spawning.spawn` (`NaturalSpawner.spawnForChunk`, actual spawn
+  attempts), `spawning.custom` (phantoms, patrols, cats, wandering trader, sieges) and `other` (the rest of that world's
+  tick). Hook sites are listed in the companion documentation. World names may contain dots; split names with
+  `worlds`. A phase absent from `phases`/`outside` had no time in any tick (the hooks are structural, so absence is
+  zero, not missing data); a phase present has a value for every row (0 where it did not run).
+- **Measured tick and `other`:** `measuredMicros[i]` is Paper's tick duration (`ServerTickEndEvent.getTickDuration()`,
+  read at the dispatch; the same interval as the scheduler's `measuredTicks`), `null` where Paper measured none
+  (empty-server pause, or the stop interrupted the tick: then `lastTickPartial` is true). `other[i] =
+  measuredMicros[i] - sum(phases[*][i])`, exactly, and `null` where the measured duration is unknown: readers must
+  label `other` unknown there, not zero. `other` is the unhooked rest of the tick (tick bookkeeping, players list,
+  chunk sending, console commands, autosave, Paper/Folia schedulers). It can only be negative through clock skew;
+  `measured.negativeOtherTicks` counts such ticks.
+- **`outside`:** time after the measured interval: `tick-end` (the `ServerTickEndEvent` dispatch, its listeners) and
+  `diagnostics` (SneakyDiagnostics work during that dispatch or between ticks). It is not part of the tick duration.
+- **`totals`:** per phase, over every committed tick including dropped ones: `totalNanos` (exact), `calls` (wrapped
+  calls), `ticksWithTime`, `maxTickMicros`; keys of outside phases carry the prefix `outside.`. `measured` sums the
+  measured ticks (`measuredNanos`, `otherMicros`) and counts ticks without a measured duration.
+- **`spawning`:** per world: `stateCalls` (`createState`), `spawnChunkCalls` (`spawnForChunk`),
+  `spawnChunkCallsThatSpawned` (calls that tried to add at least one entity), `naturalSpawnAttempts` (entities
+  `NaturalSpawner.spawnCategoryForPosition` tried to add, before spawn events can cancel them) and `customSpawnerCalls`.
+  Natural spawning is disabled on LoM, so readers report any spawning time as a finding and say which part ran.
+- **Bounds:** at most `capacity` (capture seconds x 40) rows; `dropped` counts the rest. At most 64 worlds: later
+  worlds' time stays in the enclosing phase, their names are in `omittedWorlds` and their calls in
+  `omittedWorldCalls`. Nesting deeper than 32 phases is counted in `depthOverflow` (the parent keeps the time).
+  At most 8,000,000 stored values (columns x capacity): later phases keep their totals but have no per-tick values and
+  are listed in `omittedSeries`. `nestingErrors` (mismatched frames) and `spanningTicks` (a frame open across a tick
+  boundary) should be 0. Any of these makes `phasesComplete` false.
+- **Without the companion** (or with an older one): `available` is false, `unavailableReason` says why, `complete` is
+  false and no phase fields are present. `igniteError` is set when the probe failed at stop. `complete` is true only
+  for a `completed` capture with `phasesComplete` and no `errors`.
 
 ## `manifest.json`
 

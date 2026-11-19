@@ -53,6 +53,7 @@ def render(r: dict[str, Any]) -> str:
         o.extend(_provider(p))
     o.extend(_scheduler(r["scheduler"]))
     o.extend(_listeners(r.get("listeners")))
+    o.extend(_phases(r.get("phases")))
     o.extend(_entities(r["entities"]))
     o.extend(_spawns(r.get("spawns")))
     o.extend(_spark(r["spark"]))
@@ -386,6 +387,19 @@ def _correlation(c: dict[str, Any]) -> list[str]:
                 o.append(f"    {msw['plugin']}: outermost scopes {msw['outermostScopesMs']} ms "
                          f"({msw['pctOfWindowTickTime']}% of tick time); self by operation: "
                          + (", ".join(f"{x['operation']} {x['selfMs']} ms" for x in msw["operationsBySelf"]) or "none"))
+        pw = w.get("phases")
+        if pw is not None and not pw.get("available"):
+            o.append(f"    tick phases: {pw['reason']}")
+        elif pw is not None and not pw["phases"]:
+            o.append(f"    tick phases: {pw['note']}")
+        elif pw is not None:
+            o.append(f"    tick phases this second ({pw['ticks']} ticks"
+                     + (f", {pw['placedByOffset']} placed by start offset" if pw["placedByOffset"] else "")
+                     + f"): measured {pw['measuredMs']} ms, other {pw['otherMs']} ms"
+                     + (f" (unknown for {pw['otherUnknownTicks']} ticks)" if pw["otherUnknownTicks"] else "")
+                     + (f", diagnostics' own {pw['diagnosticsMs']} ms" if pw["diagnosticsMs"] else ""))
+            o += table(pw["phases"], [("phase", "phase"), ("ms", "ms"), ("pctOfMeasured", "% of measured"),
+                                      ("medianWindowMs", "median win ms"), ("xMedian", "x median")], "      ")
         lw = w.get("listeners")
         if lw is not None:
             o.append(f"    Ignite listeners this second: {lw['selfMs']} ms self over all owners (server thread)")
@@ -451,6 +465,15 @@ def _leads(r: dict[str, Any]) -> list[str]:
         t = li["byOwner"][0]
         o.append(f"  - Listeners: {t['owner']} has the most listener self time ({t['selfMs']} ms over {t['calls']:,} calls); "
                  "see the Listeners section for which listener and event.")
+    ph = r.get("phases") or {}
+    if ph.get("available"):
+        top_phase = next((x for x in ph["inside"] if x["phase"] not in ("other", "diagnostics")), None)
+        if top_phase:
+            o.append(f"  - Tick phases: '{top_phase['phase']}' takes the most measured tick time ({top_phase['pctOfMeasured']}%, "
+                     f"{top_phase['totalMs']:,.1f} ms); see Tick phases and the per-window breakdown.")
+        if ph["spawning"]["finding"]:
+            o.append("  - Spawning: natural-spawning code ran although spawning should be disabled (see Tick phases); "
+                     "check spawn limits, per-player mob spawns and spawn-category settings.")
     sp = r.get("spawns") or {}
     if sp.get("naturalFinding"):
         o.append("  - Spawns: natural-type spawning is active although it should be disabled (see Spawns); check world "
@@ -521,6 +544,48 @@ def _listeners(li: dict[str, Any] | None) -> list[str]:
                               ("meanUs", "mean us"), ("p99MsUpperBound", "p99 ms<="), ("maxMs", "max ms"),
                               ("otherThreadCalls", "other-thread calls")], "    ")
     o.append("  " + li["note"])
+    return o
+
+
+def _phases(p: dict[str, Any] | None) -> list[str]:
+    o = _head("Tick phases (exclusive time per tick phase)")
+    if not p or not p.get("available"):
+        return o + ["  " + (p or {}).get("reason", "no tick phases")]
+    o.append(f"  {p['ticks']:,} ticks, {p['measuredTicks']:,} with a measured duration ({p['measuredMs']:,.1f} ms, mean "
+             f"{p['meanMeasuredMsPerTick']} ms per tick); worlds: {', '.join(p['worlds']) or 'none'}; "
+             f"complete={p['complete']}")
+    for why in p["why"]:
+        o.append("  GAP " + why)
+    c = p["consistency"]
+    if c.get("checked") and c["mismatchedTicks"]:
+        o.append(f"  WARNING inconsistent data: phases + other differ from the measured duration in {c['mismatchedTicks']} ticks")
+    sp = p["spawning"]
+    if sp["finding"]:
+        o += ["  " + "!" * 76, "  !!! " + sp["finding"], "  " + "!" * 76]
+        o += table(sp["worlds"], [("world", "world"), ("stateMs", "createState ms"), ("stateCalls", "calls"),
+                                  ("spawnMs", "spawnForChunk ms"), ("spawnChunkCalls", "calls"),
+                                  ("spawnChunkCallsThatSpawned", "calls that spawned"),
+                                  ("naturalSpawnAttempts", "entities attempted"), ("customMs", "custom spawners ms"),
+                                  ("customSpawnerCalls", "calls")], "    ")
+    else:
+        o.append("  no natural-spawning time (createState, spawnForChunk, custom spawners) was recorded")
+    o.append(f"  inside the measured tick (top {p['insideShown']} of {p['insideCount']} phases, then 'other'):")
+    o += table(p["inside"], [("phase", "phase"), ("totalMs", "total ms"), ("pctOfMeasured", "% of measured"),
+                             ("meanUsPerTick", "mean us/tick"), ("maxTickMs", "max ms/tick"), ("ticksWithTime", "ticks"),
+                             ("note", "note")], "    ")
+    if p["byKind"]:
+        o.append("  per-world phases summed over worlds:")
+        o += table(p["byKind"], [("kind", "kind"), ("totalMs", "total ms"), ("pctOfMeasured", "% of measured")], "    ")
+    if len(p["byWorld"]) > 1:
+        o.append("  by world:")
+        o += table(p["byWorld"], [("world", "world"), ("totalMs", "total ms"), ("pctOfMeasured", "% of measured")], "    ")
+    o.append("  outside the measured tick (after Paper measured it):")
+    o += table(p["outside"], [("phase", "phase"), ("totalMs", "total ms"), ("meanUsPerTick", "mean us/tick"),
+                              ("maxTickMs", "max ms/tick")], "    ")
+    d = p["diagnostics"]
+    o.append(f"  SneakyDiagnostics' own server-thread work: {d['insideMs']} ms inside the measured ticks "
+             f"({d['pctOfMeasured']}%), {d['outsideMs']} ms after them")
+    o.append("  " + p["note"])
     return o
 
 

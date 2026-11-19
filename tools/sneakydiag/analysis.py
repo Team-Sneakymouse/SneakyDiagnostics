@@ -9,11 +9,12 @@ from .correlate import correlate
 from .listeners import analyze_listeners
 from .loader import Capture, group_histogram
 from .spawns import analyze_spawns
+from .phases import analyze_phases
 from .coverage import analyze_coverage
 from .providers import analyze_provider, slow_records
 from .util import hist_upper_ns, ms, num, pct, scan_flags, top
 
-STANDARD_COLLECTORS = ("timeline", "scheduler", "entities", "plugins", "spark", "connections")
+STANDARD_COLLECTORS = ("timeline", "scheduler", "phases", "entities", "plugins", "spark", "connections")
 
 
 @dataclass
@@ -37,6 +38,7 @@ def analyze(cap: Capture, opts: Options | None = None) -> dict[str, Any]:
         "providers": providers,
         "scheduler": analyze_scheduler(cap, opts.top),
         "listeners": analyze_listeners(cap, opts.top),
+        "phases": analyze_phases(cap, opts.top),
         "entities": analyze_entities(cap, opts.top),
         "spawns": analyze_spawns(cap, opts.top),
         "spark": analyze_spark_meta(cap),
@@ -75,7 +77,11 @@ def analyze_inventory(cap: Capture, providers: list[dict[str, Any]]) -> dict[str
 
 
 def _collector_detail(name: str, r: dict[str, Any]) -> str | None:
-    """Collection settings a reader needs to judge coverage (census budget and visit order)."""
+    """Collection settings a reader needs to judge coverage (census budget and visit order, phase availability)."""
+    if name == "phases":
+        if r.get("available") is not True:
+            return f"tick phases unavailable: {r.get('unavailableReason') or r.get('igniteError') or 'no companion'}"
+        return f"tick phases from the Ignite server probe; worlds: {', '.join(map(str, r.get('worlds') or [])) or 'none'}"
     if name != "entities":
         return None
     budget, order = r.get("budgetMillisPerSecond"), r.get("visitOrder")

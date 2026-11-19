@@ -49,6 +49,15 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
   priority, ranked by server-thread self time (nested listener calls subtracted, so self times add up), with calls, inclusive time, mean,
   p99 (log2 bucket upper bound), max and other-thread calls; time in `ServerTickEndEvent` listeners (outside tick durations) is shown
   apart, and observed calls are checked against totals + overflow + running at stop. An older companion is reported as "not recorded".
+- **Tick phases** (`phases-1.json`, Ignite companion, 2026-11): exclusive time per tick phase (tick-start tasks,
+  scheduler, each world's entities/chunks/tracker/block entities/block events/spawning/rest, connections, diagnostics)
+  with total ms, share of the measured tick time, mean us per tick and max per tick, then `other` (measured ticks only;
+  unknown, not zero, for ticks without a measured duration), the per-world kinds summed over worlds, the `outside`
+  phases (tick-end dispatch, diagnostics after the measured interval) and SneakyDiagnostics' own time so it can be
+  subtracted. Any natural-spawning time is a loud finding that separates mob-cap bookkeeping (`createState`), per-chunk
+  spawning (`spawnForChunk`, with calls that tried to spawn and entities attempted) and custom spawners, and says which
+  ran. Phases + other are checked against the measured duration per tick. A capture without the file says "not
+  recorded"; one without the companion says "unavailable".
 - **Entity census**: segment-combined counts by type and owner hint, tracked-subscription groups, per-world coverage (unreached worlds are unknown, not zero).
 - **Spawns**: entity spawns from the timeline (2026-11) by reason, by spawning plugin (CUSTOM/DEFAULT, a hint) and by reason x type.
   Natural spawning is disabled on this server, so any natural-type reason (NATURAL, CHUNK_GEN, JOCKEY, MOUNT, PATROL, RAID,
@@ -59,6 +68,9 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
   and its sampled levels against their median (a level with no sample in that second is left out, not shown as zero).
   With Ignite listener totals it shows each owner plugin's listener self and inclusive time in that second against its median second,
   and the slow-vs-other comparison includes owners' listener self time.
+  With tick phases it shows the window's phases (summed over its ticks, placed by current tick when the timeline has
+  ranges, else by the row's start offset, and counted) against each phase's median second, plus `other` and
+  diagnostics' own time; phases also enter the slow-vs-other comparison.
   It also lists sections that are busier in slow windows than in other windows. A provider
   with no series gets an explicit "cannot be attributed" statement. MagicSpells' operation series (execution-4) is shown per
   window as outermost-scope time and self time by operation. **Slow calls** place individual timed calls in the window: Ignite's
@@ -112,8 +124,9 @@ official runtime on real profiles. If spark renumbers fields, update the `F_*` c
 
 For the controlled-change workflow: capture, change one thing, capture again under comparable load, then compare.
 Tick statistics, probe sections matched by provider + section name (per-observed-second rates, with added/removed flagged), MagicSpells spells and operations,
-Ignite groups, Ignite listener totals (self and inclusive ms per second by owner + listener + event + priority), spawns per second by reason x type
-(x plugin), levels, counts and scheduler pending. A side without listener totals or spawn counts is reported as "not compared, not zero", and
+Ignite groups, Ignite listener totals (self and inclusive ms per second by owner + listener + event + priority), tick phases (mean us per tick
+and share of the measured tick, per phase), spawns per second by reason x type (x plugin), levels, counts and scheduler pending. A side
+without listener totals, tick phases or spawn counts is reported as "not compared, not zero", and
 natural-type spawns in either capture add a warning. The top of the output is a loud block when:
 
 - players, entities or chunks differ by more than `--tolerance` (default 10%), or workload is unknown for either capture (manifest first, else the last spark window, labelled approximate),

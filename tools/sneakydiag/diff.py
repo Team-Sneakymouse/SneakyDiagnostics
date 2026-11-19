@@ -6,7 +6,7 @@ from typing import Any
 
 from .analysis import Options, analyze
 from .listeners import short
-from .loader import Capture, listener_totals, spawns
+from .loader import Capture, listener_totals, phases, spawns
 from .spawns import NATURAL_REASONS
 from .providers import recover_spells
 from .sparkwire import ProfileError, read_profile
@@ -57,8 +57,18 @@ def extract(cap: Capture) -> dict[str, Any]:
     m: dict[str, Any] = {
         "result": r, "workload": workload_of(cap), "timeline": tl,
         "sections": {}, "levels": {}, "counts": {}, "freeform": {}, "scheduler": {}, "providers": {},
-        "listeners": {}, "spawns": {}, "listenerTotals": False, "spawnCounts": False,
+        "listeners": {}, "spawns": {}, "listenerTotals": False, "spawnCounts": False, "phases": None,
     }
+    ph = phases(cap)
+    if ph is not None and ph["available"]:
+        known = [i for i in range(len(ph["ticks"])) if ph["measured"][i] is not None and ph["other"][i] is not None]
+        rows = {}
+        for prefix, cols in (("", ph["phases"]), ("outside.", ph["outside"])):
+            for name, col in cols.items():
+                rows[prefix + name] = {"us": sum(col), "measuredUs": sum(col[i] for i in known)}
+        rows["other"] = {"us": sum(ph["other"][i] for i in known), "measuredUs": sum(ph["other"][i] for i in known)}
+        m["phases"] = {"rows": rows, "ticks": len(ph["ticks"]), "measuredTicks": len(known),
+                       "measuredUs": sum(ph["measured"][i] for i in known), "complete": ph["phasesComplete"]}
     lt = listener_totals(cap)
     if lt is not None:
         m["listenerTotals"] = True
@@ -160,6 +170,8 @@ def compare(before: Capture, after: Capture, *, tolerance: float = 0.10, top: in
     out["listenersNote"] = _missing_note("listener totals", b["listenerTotals"], a["listenerTotals"])
     out["spawns"] = (_count_deltas(b["spawns"], a["spawns"], top) if b["spawnCounts"] and a["spawnCounts"] else None)
     out["spawnsNote"] = _missing_note("spawn counts", b["spawnCounts"], a["spawnCounts"])
+    out["phases"] = _phase_deltas(b["phases"], a["phases"], top) if b["phases"] and a["phases"] else None
+    out["phasesNote"] = _missing_note("tick phases", b["phases"] is not None, a["phases"] is not None)
     out["scheduler"] = [{"metric": k, "before": b["scheduler"].get(k), "after": a["scheduler"].get(k)}
                         for k in sorted(set(b["scheduler"]) | set(a["scheduler"]))
                         if k.startswith("pending") or abs(num(a["scheduler"].get(k)) - num(b["scheduler"].get(k))) > 0][:top + 2]
@@ -318,6 +330,32 @@ def _calls_per_sec(r: dict[str, Any] | None) -> float | None:
     return round(r["calls"] / (r["spanMs"] / 1000), 2)
 
 
+def _phase_deltas(b: dict[str, Any], a: dict[str, Any], top: int) -> dict[str, Any]:
+    """Per phase: mean microseconds per tick and share of measured tick time, before and after."""
+    def per_tick(side: dict[str, Any], name: str) -> float | None:
+        r = side["rows"].get(name)
+        return round(r["us"] / side["ticks"], 1) if r is not None and side["ticks"] else None
+
+    def share(side: dict[str, Any], name: str) -> float | None:
+        r = side["rows"].get(name)
+        return round(100 * r["measuredUs"] / side["measuredUs"], 2) if r is not None and side["measuredUs"] and \
+            not name.startswith("outside.") else None
+
+    rows = []
+    for name in set(b["rows"]) | set(a["rows"]):
+        pb, pa = per_tick(b, name), per_tick(a, name)
+        rows.append({"phase": name, "usPerTickBefore": pb, "usPerTickAfter": pa,
+                     "deltaUsPerTick": round((pa or 0) - (pb or 0), 1),
+                     "pctOfMeasuredBefore": share(b, name), "pctOfMeasuredAfter": share(a, name),
+                     "status": "added" if name not in b["rows"] else "removed" if name not in a["rows"] else "changed"})
+    rows.sort(key=lambda r: abs(r["deltaUsPerTick"]), reverse=True)
+    return {"top": rows[:top],
+            "meanMeasuredMsPerTick": {"before": round(b["measuredUs"] / b["measuredTicks"] / 1000, 3) if b["measuredTicks"] else None,
+                                      "after": round(a["measuredUs"] / a["measuredTicks"] / 1000, 3) if a["measuredTicks"] else None},
+            "note": ("Mean exclusive microseconds per recorded tick and share of the measured tick time. A phase missing "
+                     "on one side had no time there (worlds can differ). 'other' covers measured ticks only.")}
+
+
 def _level_deltas(b: dict[Key, dict[str, Any]], a: dict[Key, dict[str, Any]], top: int) -> list[dict[str, Any]]:
     rows = []
     for key in set(b) | set(a):
@@ -400,6 +438,17 @@ def render_diff(d: dict[str, Any]) -> str:
                                ("selfDeltaMsPerSec", "delta"), ("totalMsPerSecBefore", "incl ms/s before"),
                                ("totalMsPerSecAfter", "incl ms/s after"), ("callsPerSecBefore", "calls/s before"),
                                ("callsPerSecAfter", "calls/s after")])
+    o += ["", "Tick phases (exclusive; mean us per tick and share of measured tick time)"]
+    pd = d.get("phases")
+    if pd is None:
+        o.append("  " + (d.get("phasesNote") or "unavailable"))
+    else:
+        mm = pd["meanMeasuredMsPerTick"]
+        o.append(f"  mean measured tick: {mm['before']} ms before, {mm['after']} ms after")
+        o += table(pd["top"], [("phase", "phase"), ("status", "status"), ("usPerTickBefore", "us/tick before"),
+                               ("usPerTickAfter", "us/tick after"), ("deltaUsPerTick", "delta"),
+                               ("pctOfMeasuredBefore", "% before"), ("pctOfMeasuredAfter", "% after")])
+        o.append("  " + pd["note"])
     o += ["", "Spawns (timeline; spawned per observed second, cancelled spawns excluded)"]
     if d.get("spawns") is None:
         o.append("  " + (d.get("spawnsNote") or "unavailable"))

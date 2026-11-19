@@ -481,6 +481,94 @@ def group_histogram(group: dict[str, Any]) -> list[float] | None:
     return hist if hist is not None and len(hist) <= 64 else None
 
 
+PHASE_KINDS = ("entities", "chunks", "tracker", "block-entities", "block-events", "spawning.state", "spawning.spawn",
+               "spawning.custom", "other")
+
+
+def _ints_or_none(v: Any, n: int) -> list[int | None] | None:
+    """A list of exactly ``n`` integers or nulls, else None (malformed)."""
+    if not isinstance(v, list) or len(v) != n:
+        return None
+    out: list[int | None] = []
+    for x in v:
+        if x is None or (isinstance(x, int) and not isinstance(x, bool)):
+            out.append(x)
+        else:
+            return None
+    return out
+
+
+def split_phase(name: str, worlds: list[str]) -> tuple[str | None, str]:
+    """``level.<world>.<kind>`` -> (world, kind) using the report's world list (names may contain dots); else (None, name)."""
+    if name.startswith("level."):
+        for world in sorted(worlds, key=len, reverse=True):
+            prefix = f"level.{world}."
+            if name.startswith(prefix) and name[len(prefix):] in PHASE_KINDS:
+                return world, name[len(prefix):]
+    return None, name
+
+
+def phases(cap: Capture) -> dict[str, Any] | None:
+    """``phases-1.json`` (2026-11): exclusive per-tick phase time (microseconds) from the Ignite server probe.
+
+    None when the capture has no phases report (collector not run: "not recorded"). Otherwise ``available`` is False with
+    a ``reason`` when the companion was missing, or the normalized rows: ``ticks``/``start``/``measured`` (None where
+    unknown), ``phases`` and ``outside`` (name -> list aligned with the ticks), ``other`` (None where unknown), ``totals``,
+    ``spawning`` and the bound counters. Malformed phase lists are dropped and named in ``malformed``.
+    """
+    r = cap.report("phases")
+    if r is None:
+        return None
+    header = {"reason": r.get("reason"), "complete": r.get("complete"),
+              "finishedAfterMillis": _n(r.get("finishedAfterMillis"))}
+    if r.get("available") is not True:
+        why = r.get("unavailableReason") or r.get("igniteError") or r.get("igniteAvailability") or "no phase data"
+        return {**header, "available": False, "reason": str(why)}
+    t = r.get("ticks") if isinstance(r.get("ticks"), dict) else {}
+    ticks = _ints_or_none(t.get("tick"), len(t.get("tick")) if isinstance(t.get("tick"), list) else -1)
+    if ticks is None or any(x is None for x in ticks):
+        return {**header, "available": False, "reason": "phases report has no valid tick rows"}
+    n = len(ticks)
+    start = _ints_or_none(t.get("startOffsetMicros"), n)
+    measured = _ints_or_none(t.get("measuredMicros"), n)
+    other = _ints_or_none(r.get("other"), n)
+    worlds = [str(w) for w in r.get("worlds") or [] if isinstance(w, str)]
+    malformed: list[str] = []
+
+    def columns(raw: Any, prefix: str) -> dict[str, list[int]]:
+        out: dict[str, list[int]] = {}
+        for name, values in (raw or {}).items() if isinstance(raw, dict) else ():
+            col = _ints_or_none(values, n)
+            if col is None or any(x is None for x in col):
+                malformed.append(prefix + str(name))
+                continue
+            out[str(name)] = col  # type: ignore[assignment]
+        return out
+
+    totals = {}
+    for name, v in (r.get("totals") or {}).items() if isinstance(r.get("totals"), dict) else ():
+        if isinstance(v, dict):
+            totals[str(name)] = {"totalNanos": _n(v.get("totalNanos")), "calls": _n(v.get("calls")),
+                                 "ticksWithTime": _n(v.get("ticksWithTime")), "maxTickMicros": _n(v.get("maxTickMicros"))}
+    spawning = {}
+    for world, v in (r.get("spawning") or {}).items() if isinstance(r.get("spawning"), dict) else ():
+        if isinstance(v, dict):
+            spawning[str(world)] = {k: _n(v.get(k)) for k in ("stateCalls", "spawnChunkCalls", "spawnChunkCallsThatSpawned",
+                                                               "naturalSpawnAttempts", "customSpawnerCalls")}
+    m = r.get("measured") if isinstance(r.get("measured"), dict) else {}
+    return {**header, "available": True, "phasesComplete": r.get("phasesComplete"),
+            "ticks": ticks, "start": start or [None] * n, "measured": measured or [None] * n,
+            "other": other or [None] * n, "otherValid": other is not None,
+            "phases": columns(r.get("phases"), ""), "outside": columns(r.get("outside"), "outside."),
+            "totals": totals, "worlds": worlds, "spawning": spawning, "malformed": malformed,
+            "capacity": _n(t.get("capacity")), "dropped": _n(t.get("dropped")),
+            "unmeasuredTicks": _n(m.get("unmeasuredTicks")), "negativeOtherTicks": _n(m.get("negativeOtherTicks")),
+            "omittedWorlds": [str(w) for w in r.get("omittedWorlds") or [] if isinstance(w, str)],
+            "omittedSeries": [str(w) for w in r.get("omittedSeries") or [] if isinstance(w, str)],
+            "depthOverflow": _n(r.get("depthOverflow")), "nestingErrors": _n(r.get("nestingErrors")),
+            "spanningTicks": _n(r.get("spanningTicks")), "lastTickPartial": r.get("lastTickPartial") is True}
+
+
 def spawns(cap: Capture) -> dict[str, Any] | None:
     """The timeline's ``spawns``: entity spawns by reason x entity type (x plugin for CUSTOM/DEFAULT spawns).
 

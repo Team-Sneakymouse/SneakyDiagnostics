@@ -4,7 +4,8 @@ from __future__ import annotations
 import bisect
 from typing import Any
 
-from .loader import Capture, listener_totals
+from .loader import Capture, listener_totals, phases
+from .phases import window_phases
 from .providers import key_series, level_at, level_median, magicspells_series, median, series_windows
 from .util import ms, num, pct
 
@@ -36,6 +37,9 @@ def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str
             no_series.append({"plugin": p.plugin, "why": why})
         else:
             probes.append((p, sw))
+    ticks = TickRanges(wins)
+    ph = phases(cap)
+    phase_windows = window_phases(ph, ticks.window if ticks.ranges else None)
     out: dict[str, Any] = {
         "available": True, "slowThresholdMs": opts.slow_ms, "slowWindowCount": len(slow),
         "windowCount": len(wins), "shownWindows": len(chosen), "note": NOTE,
@@ -44,12 +48,11 @@ def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str
         "igniteNote": _ignite_note(cap),
         "slowCallNote": SLOW_NOTE,
         "tickMatching": None,
-        "windows": [], "lift": _lift(probes, wins, slow, opts.slow_ms, _listener_series(cap)),
+        "windows": [], "lift": _lift(probes, wins, slow, opts.slow_ms, _listener_series(cap), phase_windows),
     }
     snaps = (scheduler or {}).get("snapshots", [])
     owner_series = _listener_series(cap)
     calls = slow_calls(cap)
-    ticks = TickRanges(wins)
     out["tickMatching"] = ticks.status
     measured = MeasuredTicks(cap)
     out["measuredTicks"] = measured.status
@@ -58,8 +61,35 @@ def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str
         entry["magicSpells"] = [_spells_in_window(p, mss, w) for p, mss in spells]
         entry["slowCalls"] = _calls_in_window(calls, w, ticks, measured)
         entry["listeners"] = _listeners_in_window(owner_series, w)
+        entry["phases"] = _phases_in_window(ph, phase_windows, w)
         out["windows"].append(entry)
     return out
+
+
+PHASE_NOTE = ("Tick phases of this second's ticks (exclusive, so they add up with 'other' to the measured tick time); "
+              "x median compares with the phase's median second.")
+
+
+def _phases_in_window(ph: dict[str, Any] | None, by_window: dict[int, dict[str, Any]], w: dict[str, Any]) -> dict[str, Any] | None:
+    """The window's tick phases against each phase's median window (None when the capture has no phases report)."""
+    if ph is None:
+        return None
+    if not ph.get("available"):
+        return {"available": False, "reason": f"unavailable: {ph.get('reason')}"}
+    here = by_window.get(w["index"])
+    if not here:
+        return {"available": True, "phases": [], "note": "no tick phase rows in this window"}
+    medians = {name: median([b["phases"].get(name, 0) for b in by_window.values()]) for name in here["phases"]}
+    rows = [{"phase": name, "ms": round(us / 1000, 3), "pctOfMeasured": pct(us, here["measured"]) if here["measured"] else None,
+             "medianWindowMs": round(medians[name] / 1000, 3),
+             "xMedian": round(us / medians[name], 2) if medians[name] else None}
+            for name, us in here["phases"].items()]
+    rows.sort(key=lambda r: r["ms"], reverse=True)
+    return {"available": True, "ticks": here["ticks"], "placedByOffset": here["byOffset"],
+            "measuredMs": round(here["measured"] / 1000, 3), "otherMs": round(here["other"] / 1000, 3),
+            "otherUnknownTicks": here["otherUnknownTicks"],
+            "diagnosticsMs": round(here["phases"].get("diagnostics", 0) / 1000, 3),
+            "phases": rows[:8], "note": PHASE_NOTE}
 
 
 def _tick(v: Any) -> int | None:
@@ -473,7 +503,7 @@ def _pending_deltas(before: dict[str, Any] | None, s: dict[str, Any]) -> list[di
 
 
 def _lift(probes: list[Any], wins: list[dict[str, Any]], slow: list[dict[str, Any]], slow_ms: float,
-          listeners: dict[str, Any] | None = None) -> dict[str, Any]:
+          listeners: dict[str, Any] | None = None, phase_windows: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
     """Sections whose per-window time is higher in slow windows than in the other windows."""
     slow_idx = {w["index"] for w in slow}
     other_idx = {w["index"] for w in wins} - slow_idx
@@ -501,11 +531,20 @@ def _lift(probes: list[Any], wins: list[dict[str, Any]], slow: list[dict[str, An
                 ma, mb = sum(a) / len(a), sum(b) / len(b)
                 rows.append({"plugin": owner, "section": "[listener self time]", "slowMeanMs": ms(ma),
                              "otherMeanMs": ms(mb), "diffMs": ms(ma - mb), "ratio": round(ma / mb, 2) if mb else None})
+    if phase_windows:
+        names = {name for b in phase_windows.values() for name in b["phases"]}
+        for name in sorted(names):
+            a = [phase_windows[i]["phases"].get(name, 0) * 1000 for i in slow_idx if i in phase_windows]
+            b = [phase_windows[i]["phases"].get(name, 0) * 1000 for i in other_idx if i in phase_windows]
+            if a and b:
+                ma, mb = sum(a) / len(a), sum(b) / len(b)
+                rows.append({"plugin": "[tick phase]", "section": name, "slowMeanMs": ms(ma), "otherMeanMs": ms(mb),
+                             "diffMs": ms(ma - mb), "ratio": round(ma / mb, 2) if mb else None})
     rows.sort(key=lambda r: r["diffMs"], reverse=True)
     return {"available": True, "slowWindows": len(slow_idx), "otherWindows": len(other_idx),
             "thresholdMs": slow_ms, "sections": rows[:10],
-            "note": ("Mean ms per one-second window: inclusive for probe sections, self for listener rows. "
-                     "Correlation, not causation.")}
+            "note": ("Mean ms per one-second window: inclusive for probe sections, self for listener rows, exclusive "
+                     "for tick phases. Correlation, not causation.")}
 
 
 def _listener_series(cap: Capture) -> dict[str, Any] | None:
