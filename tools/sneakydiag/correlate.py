@@ -6,6 +6,7 @@ from typing import Any
 
 from .loader import Capture, listener_totals, phases
 from .phases import window_phases
+from .tracker import tracker_window
 from .providers import key_series, level_at, level_median, magicspells_series, median, series_windows
 from .util import ms, num, pct
 
@@ -62,6 +63,7 @@ def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str
         entry["slowCalls"] = _calls_in_window(calls, w, ticks, measured)
         entry["listeners"] = _listeners_in_window(owner_series, w)
         entry["phases"] = _phases_in_window(ph, phase_windows, w)
+        entry["tracker"] = tracker_window(cap, w["fromMillis"], w["ticks"] * w["meanMspt"])
         out["windows"].append(entry)
     return out
 

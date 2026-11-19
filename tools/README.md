@@ -58,6 +58,10 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
   spawning (`spawnForChunk`, with calls that tried to spawn and entities attempted) and custom spawners, and says which
   ran. Phases + other are checked against the measured duration per tick. A capture without the file says "not
   recorded"; one without the companion says "unavailable".
+- **Tracker sends** (`packets-1.json`): entity-tracker send time (`ServerEntity.sendChanges`) by entity type x owner hint,
+  by type and by owner, with the metadata part, sends per entity, mean, max and p99 bucket bound, and the busiest second.
+  Player checks are not included. A report without a `tracker` section (no companion) is shown as unmeasured, not zero;
+  window correlation shows each slow window's tracker send time and its largest groups.
 - **Entity census**: segment-combined counts by type and owner hint, tracked-subscription groups, per-world coverage (unreached worlds are unknown, not zero).
 - **Spawns**: entity spawns from the timeline (2026-11) by reason, by spawning plugin (CUSTOM/DEFAULT, a hint) and by reason x type.
   Natural spawning is disabled on this server, so any natural-type reason (NATURAL, CHUNK_GEN, JOCKEY, MOUNT, PATROL, RAID,

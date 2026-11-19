@@ -5,7 +5,10 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import javax.management.ObjectName;
 
-/** The companion's second MBean (protocol 1): server-internal probes. {@code start} and {@code stop} run on the server thread. */
+/**
+ * The companion's second MBean (protocol 1): server-internal probes. {@code start} and {@code stop} run on the server
+ * thread. Merge interim: starts and stops both probes together; the next commit makes them addressable by name.
+ */
 public final class ServerControl implements ServerControlMBean {
     public static final String OBJECT_NAME = "com.teamsneakymouse.sneakydiagnostics:type=ServerProbe";
     private static boolean registered;
@@ -21,14 +24,18 @@ public final class ServerControl implements ServerControlMBean {
     }
 
     @Override public int getProtocolVersion() { return 1; }
-    @Override public String getStatus() { return "phases " + PhaseProbe.status(); }
-    @Override public void start(String captureId, long startedNanos, int seconds) { PhaseProbe.start(captureId, startedNanos, seconds); }
-    /** One top-level key per probe ({@code phases}), so further probes can add theirs beside it. */
+    @Override public String getStatus() { return "phases " + PhaseProbe.status() + "; tracker " + TrackerProbe.status(); }
+    @Override public void start(String captureId, long startedNanos, int seconds) {
+        PhaseProbe.start(captureId, startedNanos, seconds);
+        TrackerProbe.start(captureId, startedNanos, seconds);
+    }
+    /** One top-level key per probe ({@code phases}, {@code tracker}). */
     @Override public Map<String, Object> stop(String captureId) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("protocolVersion", 1);
         result.put("captureId", captureId);
         result.put("phases", PhaseProbe.stop(captureId));
+        result.put("tracker", TrackerProbe.stop(captureId).get("tracker"));
         return result;
     }
 }

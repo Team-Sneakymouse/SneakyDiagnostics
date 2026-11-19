@@ -2,7 +2,10 @@ package com.teamsneakymouse.sneakydiagnostics.ignite.probe;
 
 import java.util.Map;
 
-/** Local classloader-neutral control protocol for server-internal probes. No remotely exposed connector is opened. */
+/**
+ * Local classloader-neutral control protocol for server-internal probes (tick phases and entity-tracker sends).
+ * Separate from the scheduler bridge, so that protocol stays unchanged. No remotely exposed connector is opened.
+ */
 public interface ServerControlMBean {
     int getProtocolVersion();
     String getStatus();

@@ -15,7 +15,7 @@ import org.bukkit.scheduler.BukkitTask;
 /** Executes real transformed scheduler classes without starting Minecraft, worlds, or a network listener. */
 public final class SchedulerProof {
     public static void main(String[] args) throws Exception {
-        try { prove(); System.out.println("PASS Ignite scheduler, listener and tick-phase hooks: sync/async/consumer/callable execution, exception preservation, cancellations, deferred attribution, slow-call records, phase targets transformed, exclusive phases, and idle behavior"); System.exit(0); }
+        try { prove(); System.out.println("PASS Ignite scheduler, listener and tick-phase hooks: sync/async/consumer/callable execution, exception preservation, cancellations, deferred attribution, slow-call records, phase targets transformed, exclusive phases, and idle behavior; tracker send hooks applied to ServerEntity and the server bridge answers"); System.exit(0); }
         catch (Throwable e) { e.printStackTrace(); System.exit(1); }
     }
     private static void prove() throws Exception {
@@ -104,6 +104,7 @@ public final class SchedulerProof {
         // Exercise the plugin's bridge in its own classloader, with no companion classes bundled there.
         PhaseProof.prove(scheduler, owner);
         if (pluginJar != null) checkPluginBridge(pluginJar);
+        checkTracker(server);
         if (pluginJar != null) PhaseProof.checkPluginBridge(pluginJar);
         benchmark(scheduler, owner, calls, server, name);
         PhaseProof.benchmark(scheduler, owner);
@@ -123,6 +124,36 @@ public final class SchedulerProof {
             var stop = type.getDeclaredMethod("stop", String.class); stop.setAccessible(true);
             check(((Map<?, ?>) stop.invoke(bridge, "plugin-bridge")).get("captureId").equals("plugin-bridge"), "Cross-classloader capture failed");
         }
+    }
+    /**
+     * Loads ServerEntity so Ignite applies the tracker Mixin (a failing injection throws here), and runs an empty capture
+     * through the server bridge, also from the plugin's classloader. No entity is created: that needs a world.
+     */
+    private static void checkTracker(javax.management.MBeanServer server) throws Exception {
+        var name = new ObjectName("com.teamsneakymouse.sneakydiagnostics:type=ServerProbe");
+        check(server.isRegistered(name), "Server control MBean missing");
+        check(Integer.valueOf(1).equals(server.getAttribute(name, "ProtocolVersion")), "Wrong server bridge protocol");
+        Class<?> serverEntity = Class.forName("net.minecraft.server.level.ServerEntity", false, CraftScheduler.class.getClassLoader());
+        var handlers = java.util.Arrays.stream(serverEntity.getDeclaredMethods()).map(java.lang.reflect.Method::getName).toList();
+        check(handlers.stream().anyMatch(n -> n.endsWith("diagnostics$sendChanges")), "sendChanges hook not applied: " + handlers);
+        check(handlers.stream().anyMatch(n -> n.endsWith("diagnostics$metadata")), "sendDirtyEntityData hook not applied: " + handlers);
+        if (pluginJar == null) return;
+        try (var loader = new java.net.URLClassLoader(new java.net.URL[]{java.nio.file.Path.of(pluginJar).toUri().toURL()}, SchedulerProof.class.getClassLoader())) {
+            Class<?> type = Class.forName("com.teamsneakymouse.sneakydiagnostics.packets.IgniteServerProbe", true, loader);
+            var constructor = type.getDeclaredConstructor(); constructor.setAccessible(true);
+            Object bridge = constructor.newInstance();
+            var available = type.getDeclaredMethod("available"); available.setAccessible(true);
+            check(Boolean.TRUE.equals(available.invoke(bridge)), "Plugin classloader cannot see the server bridge");
+            Class<?> contextType = Class.forName("com.teamsneakymouse.sneakydiagnostics.capture.CaptureContext", true, loader);
+            Object context = contextType.getConstructor(String.class, String.class, long.class, int.class, int.class)
+                    .newInstance("tracker-bridge", "proof", System.nanoTime(), 0, 60);
+            var start = type.getDeclaredMethod("start", contextType); start.setAccessible(true); start.invoke(bridge, context);
+            var stop = type.getDeclaredMethod("stop", String.class); stop.setAccessible(true);
+            var tracker = (Map<?, ?>) ((Map<?, ?>) stop.invoke(bridge, "tracker-bridge")).get("tracker");
+            check(tracker != null && Long.valueOf(0).equals(tracker.get("calls")) && Boolean.TRUE.equals(tracker.get("complete")),
+                    "Empty tracker capture across classloaders failed: " + tracker);
+        }
+        check(server.getAttribute(name, "Status").equals("available, idle"), "Tracker probe did not return to idle");
     }
     private static void pause(long millis) {
         long end = System.nanoTime() + millis * 1_000_000L;

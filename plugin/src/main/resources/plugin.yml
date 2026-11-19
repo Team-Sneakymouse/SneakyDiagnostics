@@ -10,7 +10,7 @@ commands:
   sneakydiagnostics:
     aliases: [diagnostics]
     description: Collect server diagnostics
-    usage: /<command> <entities|timeline|scheduler|phases|plugins|spark|connections|all> <start|status|stop>
+    usage: /<command> <entities|timeline|scheduler|phases|packets|plugins|spark|connections|all> <start|status|stop>
   entitycensus:
     description: Collect a loaded-entity census (compatibility command)
     usage: /<command> <start [world] [seconds]|resume [seconds]|status|stop>
@@ -24,6 +24,7 @@ permissions:
       sneakydiagnostics.timeline: true
       sneakydiagnostics.scheduler: true
       sneakydiagnostics.phases: true
+      sneakydiagnostics.packets: true
       sneakydiagnostics.plugins: true
       sneakydiagnostics.spark: true
       sneakydiagnostics.connections: true
@@ -47,6 +48,9 @@ permissions:
     default: op
   sneakydiagnostics.scheduler:
     description: Collect and control scheduler snapshot reports
+    default: op
+  sneakydiagnostics.packets:
+    description: Collect entity-tracker send timings (needs the Ignite companion)
     default: op
   sneakydiagnostics.entities:
     description: Collect and control entity census reports
