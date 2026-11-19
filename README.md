@@ -87,7 +87,7 @@ The first useful capture is during the sustained 11–15 TPS condition. With the
 ## Publishing and development
 
 The public repository is [Team-Sneakymouse/SneakyDiagnostics](https://github.com/Team-Sneakymouse/SneakyDiagnostics).
-Pushes to `main` and manual runs of the `Publish Maven` workflow build and check all modules before publishing the plugin and companion artifact sets (JAR, sources JAR, and POM) to `https://maven.sneakyrp.com/releases`. Each remote publication depends on the repository's complete checks.
+Pushes to `main` and manual runs of the `Publish Maven` workflow build and check all modules before publishing the plugin and companion artifact sets (JAR, sources JAR, and POM) to `https://maven.sneakyrp.com/sneakymouse`. Each remote publication depends on the repository's complete checks.
 
 Maven coordinates are `io.github.team-sneakymouse:SneakyDiagnostics:<version>` for the plugin and `io.github.team-sneakymouse:SneakyDiagnostics-Ignite:<version>` for the companion. The plugin's existing coordinates are preserved. The API, plugin and companion use the same version derived from the commit date in UTC and its 12-character hash: `yyyy.MM.dd-<hash>`. A committed Git checkout is required to build. The provider library is `io.github.team-sneakymouse:SneakyDiagnostics-API:<version>` and is bundled inside the plugin. The `Publish Maven` workflow and `publishAll` publish all three artifacts together. Existing consumers pinned to API `1.0.0` can keep using that published release; new API releases use the commit-derived version.
 
