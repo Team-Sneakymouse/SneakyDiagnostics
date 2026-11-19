@@ -9,7 +9,8 @@ listed under [Tick identity](#tick-identity), [Scheduler: Ignite slow calls](#sc
 [Scheduler: Ignite listener totals](#scheduler-ignite-listener-totals), [Timeline: spawns](#timeline-spawns) and
 [Entities: census budget](#entities-census-budget). [Tick phases](#tick-phases-phases-1json) (`phases-1.json`) is a new
 collector file, also a compatible addition, and so is [`packets-1.json`](#packets-1json-tracker-sends) (tracker sends
-today). Captures without either file did not run that collector; readers say "not recorded".
+and the [packet sections](#packets-1json-packet-sections)). Captures without either file did not run that collector;
+readers say "not recorded".
 
 ## Tick identity
 
@@ -299,20 +300,22 @@ server-internal probes behind `phases-1.json` and `packets-1.json`. It is separa
 | member | meaning |
 |---|---|
 | `ProtocolVersion` | `1` |
-| `Status` | every probe's state, `"; "`-separated, in registry order: `phases available, idle; tracker recording <captureId>` |
+| `Status` | every probe's state, `"; "`-separated, in registry order: `phases available, idle; tracker recording <captureId>; packets recording <captureId>` |
 | `start(String probe, String captureId, long startedNanos, int seconds)` | starts that probe; server thread |
 | `stop(String probe, String captureId)` → `Map` | stops that probe and returns its result; server thread |
 
-- **Probes by name:** `phases` (tick phases) and `tracker` (entity-tracker sends). Each probe owns its own capture, so
-  several probes can record the same capture ID at once (`/diagnostics all` starts both) and each can run alone. A
-  second `start` of the same probe fails until it is stopped; `stop` checks the capture ID per probe. An unknown name
-  fails with `IllegalArgumentException` ("Unknown server probe '<name>'; known: phases, tracker"); JMX wraps it in a
-  `RuntimeMBeanException`.
+- **Probes by name:** `phases` (tick phases), `tracker` (entity-tracker sends) and `packets` (packet classes, causes,
+  tracker owners, inbound; 2026-11). Each probe owns its own capture, so several probes can record the same capture ID
+  at once (`/diagnostics all` starts all three; the `packets` collector starts `tracker` and `packets`) and each can
+  run alone. A second `start` of the same probe fails until it is stopped; `stop` checks the capture ID per probe. An
+  unknown name fails with `IllegalArgumentException` ("Unknown server probe '<name>'; known: phases, tracker,
+  packets"); JMX wraps it in a `RuntimeMBeanException`.
 - **Results:** every result map holds `captureId`. `phases` returns the `phases-1.json` fields at top level (with
   `schema: "sneakydiagnostics.phases/1"`). `tracker` returns `{captureId, tracker}`: its `packets-1.json` section under
-  its name. A later packet probe returns its own sections the same way.
+  its name. `packets` returns `{captureId, outbound, causes, trackerCauses, inbound}`, or `{captureId, error}` when it
+  was stopped off the server thread (counts discarded).
 - **Availability:** a plugin bridge treats the probe as available when the MBean is registered, `ProtocolVersion` is 1
-  and `Status` lists the probe's name. A probe added later (`packets` is planned) joins the registry without a protocol
+  and `Status` lists the probe's name. A probe added later (as `packets` was) joins the registry without a protocol
   change; a bridge sees an older companion as "without the <name> probe".
 - **Protocol stays 1:** the named start/stop replaced the single-probe signature from the tick-phases and tracker
   branches before anything using this MBean was released or deployed, so no reader or companion with the older shape
@@ -391,12 +394,14 @@ report tick phases as "not recorded", never as zero. Standard header plus:
 ## `packets-1.json` (tracker sends)
 
 Collector `packets` (`/diagnostics packets start [seconds]`, included in `all`, permission
-`sneakydiagnostics.packets`). Today it holds only the entity tracker's send time, measured by the Ignite companion's
-[`ServerProbe` MBean](#ignite-serverprobe-mbean-protocol-1) (probe `tracker`). The file will later gain per-packet-class
-outbound sections, other send causes and inbound sections; those are compatible additions, and readers report a missing
-section as "not recorded", never zero.
+`sneakydiagnostics.packets`). It holds the entity tracker's send time (this section, probe `tracker`) and the
+[packet sections](#packets-1json-packet-sections) (probe `packets`), both measured by the Ignite companion's
+[`ServerProbe` MBean](#ignite-serverprobe-mbean-protocol-1) under the report's capture ID. Readers report a missing
+section as "not recorded" (unmeasured), never zero.
 
-Standard header plus `startedAt`, `igniteAvailability`, `errors`, `notes`, optionally `igniteError`, and:
+Standard header plus `startedAt`, `igniteAvailability` (the tracker probe's availability), `packetsAvailability`
+(2026-11, the packets probe's), `errors`, `notes`, optionally `igniteError` (tracker stop failed) and `packetsError`
+(2026-11, packets stop failed), and:
 
 ```json
 "tracker": {
@@ -426,13 +431,97 @@ Standard header plus `startedAt`, `igniteAvailability`, `errors`, `notes`, optio
 - **Coverage:** `complete` (in `tracker`) is false when `overflowEntities`, `labelErrors` or `offThreadCalls` is
   non-zero. `offThreadCalls` are sends seen on another thread: counted (approximately), not timed. `lateCalls` ended
   after the requested deadline and are left out without affecting `complete`. The report's own `complete` also needs
-  reason `completed` and no `igniteError`.
+  reason `completed`, no `igniteError` or `packetsError`, and (2026-11) all four packet sections present and complete:
+  a report from a companion with only the tracker probe is incomplete because its packets are unmeasured.
 - **Histogram and series:** `histogramLog2` uses the shared-probe buckets. Series windows are
   `[i*1000, (i+1)*1000)` ms of capture offset by a send's **end**, aligned with the timeline; `calls`/`nanos` cover
   all groups, `series.groups` the 16 groups with the largest `totalNanos` (a group with no sends in any window is left
   out). Windows with no sends are 0.
 - **No `tracker` key** (companion missing, older than this probe, or failed): tracker send time is unmeasured, not
   zero, and the report is incomplete.
+
+## `packets-1.json` (packet sections)
+
+Compatible addition (2026-11), written by the same collector from the companion's `packets` probe: `outbound`,
+`causes`, `trackerCauses` and `inbound`. Counts are per packet class, cause or entity type and owner only: no player
+identities, no payloads, no bytes on the wire. Hook sites are listed in the
+[companion documentation](../ignite/README.md#packets).
+
+```json
+"outbound": {
+  "observedMillis": 60000, "sends": 2400000, "serverThreadSends": 2390000, "otherThreadSends": 10000,
+  "serverThreadNanos": 0, "classNanos": 0, "nestedSends": 0, "otherThreadNanos": 0, "bundles": 4000,
+  "bundledPackets": 12000, "lateSends": 0, "maxClasses": 512, "classOverflow": false, "complete": true,
+  "classes": [ { "packetClass": "net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket", "sends": 0,
+                 "serverThreadSends": 0, "otherThreadSends": 0, "totalNanos": 0, "maxNanos": 0,
+                 "otherThreadNanos": 0, "bundled": 0, "histogramLog2": [0] } ],
+  "series": { "windowMillis": 1000, "sends": [0], "nanos": [0],
+              "classes": [ { "packetClass": "...", "sends": [0], "nanos": [0] } ] } },
+"causes": {
+  "maxDepth": 32, "depthOverflow": 0, "nestingErrors": 0, "complete": true,
+  "rows": [ { "cause": "tracker.metadata", "packets": 0, "broadcasts": 0, "totalNanos": 0, "maxNanos": 0 },
+            { "cause": "other", "packets": 0, "totalNanos": 0, "maxNanos": 0 } ],
+  "series": { "windowMillis": 1000, "causes": [ { "cause": "tracker.metadata", "packets": [0], "nanos": [0] } ] } },
+"trackerCauses": {
+  "entities": 0, "maxGroups": 512, "overflowEntities": 0, "labelErrors": 0, "spawnLookups": 0, "spawnsAttributed": 0,
+  "spawnLookupNanos": 0, "passThroughFrames": 0, "complete": true,
+  "groups": [ { "entityType": "ITEM_DISPLAY", "owner": "plugin:SneakyWartime", "entities": 0, "packets": 0,
+                "broadcasts": 0, "totalNanos": 0,
+                "causes": { "tracker.update": { "packets": 0, "broadcasts": 0, "totalNanos": 0 } } } ] },
+"inbound": {
+  "observedMillis": 60000, "packets": 0, "totalNanos": 0, "betweenTicksPackets": 0, "betweenTicksNanos": 0,
+  "offThreadPackets": 0, "latePackets": 0, "classOverflow": false, "complete": true,
+  "classes": [ { "packetClass": "net.minecraft.network.protocol.game.ServerboundUseItemPacket", "packets": 0,
+                 "totalNanos": 0, "maxNanos": 0, "betweenTicksPackets": 0, "betweenTicksNanos": 0,
+                 "histogramLog2": [0] } ],
+  "series": { "windowMillis": 1000, "packets": [0], "nanos": [0],
+              "classes": [ { "packetClass": "...", "packets": [0], "nanos": [0] } ] } }
+```
+
+- **Outbound** counts every `Connection.send` call (all overloads reach the wrapped one): `sends` =
+  `serverThreadSends` + `otherThreadSends`. `totalNanos` per class is **inclusive server-thread** wall time inside
+  `send`: ProtocolLib's proxy, the Netty hand-off or queueing happen below it, so this is the cost profilers attribute
+  to sending. Each value includes about one of the probe's clock reads. `serverThreadNanos` sums the outermost sends
+  only, so it is non-overlapping; `classNanos` sums the per-class times and exceeds it only when a send happens inside
+  another send (`nestedSends`, e.g. a packet listener sending). Other threads are timed apart (`otherThreadNanos`,
+  per class `otherThreadNanos`). A bundle is one send of its own class; its sub-packets add to their class's `bundled`
+  (and `bundledPackets`), not to `sends`. Paper's queued "extra packets" and the login hand-off are sent below or around
+  `send` and are not separate sends. Classes are full Mojang class names, sorted by `totalNanos`.
+- **Causes** attribute each server-thread send to the innermost wrapped call site that was running: `tracker.update`
+  (`ServerEntity.sendChanges` outside its metadata part: movement, rotation, passengers, velocity, map updates),
+  `tracker.metadata` (`sendDirtyEntityData`), `tracker.spawn` (`addPairing`), `tracker.despawn` (`removePairing`),
+  `entity.event` (equipment changes, swings, entity status and damage broadcasts), `broadcast` (`PlayerList`
+  broadcasts: positional sounds and level events, `broadcastAll`, system and chat messages), `particles`, `chunks`
+  (chunk send and unload), else `other`. Every cause has a row. `broadcasts` counts calls of the cause (re-entering the
+  cause already on top is not counted again), so fan-out = `packets` / `broadcasts`; `other` has no `broadcasts`. A
+  cause can have calls and no packets (nobody was watching). `totalNanos` is inclusive send time as in `outbound`;
+  cause rows sum to `serverThreadSends` and `classNanos` (other-thread sends have no cause). `depthOverflow` (stack deeper than 32) and `nestingErrors`
+  make `complete` false.
+- **Tracker causes** split the four tracker causes by entity type and owner: `owner` is `plugin:<name>` for an entity
+  whose spawning plugin is known (the first Paper plugin-classloader frame on the stack at `ServerLevel.addFreshEntity`,
+  skipping plugin classes that implement `LevelCallback`, recorded only while a packets capture runs and kept on the
+  entity), else the tracker section's owner hint (`(player)`, `class:<name>`, PDC namespaces, `(none)`). It is a
+  hint, not proven ownership. `entities` counts distinct tracker entries seen; `causes` holds only causes with calls or
+  packets. `spawnLookups`/`spawnsAttributed`/`spawnLookupNanos` describe the stack walks (their time is server-thread
+  time inside `addFreshEntity`, not in any packet number), `passThroughFrames` the skipped frames. Bounds as in the
+  tracker section (512 groups, `overflowEntities`, `labelErrors`; either makes `complete` false).
+- **Inbound** counts packets handled on the server thread by `PacketProcessor$ListenerAndPacket.handle`, with
+  inclusive time (plugin events fired by the packet and packets sent in response are inside it). `betweenTicks*` is the
+  part handled from `MinecraftServer.pollTask` while the server waited for the next tick; the rest ran in
+  `runAllTasksAtTickStart` (the `tick-start-tasks` phase). `offThreadPackets` (handled on another thread, counted
+  approximately, not timed) makes `complete` false.
+- **Series:** windows `[i*1000, (i+1)*1000)` ms of capture offset by the call's **end**, aligned with the timeline;
+  `outbound.series` has totals and the 32 classes with the largest `totalNanos` (classes without server-thread sends
+  are left out), `causes.series` every cause, `inbound.series` every inbound class. Windows with no calls are 0.
+- **Bounds:** at most 512 packet classes per server run (the slot table is global); further classes go to an
+  `(overflow)` row and set `classOverflow`, which makes that section incomplete. Labels are capped at 192 characters.
+  Calls ending after the deadline are counted in `lateSends`/`latePackets` and left out.
+- **Relation to other sections:** outbound and inbound times are inclusive and overlap every tick phase; never add them
+  to phases. Sends attributed to `tracker.update` + `tracker.metadata` are part of the tracker section's `totalNanos`
+  (`sendChanges`, inclusive), which is part of the exclusive `level.<world>.tracker` phase; `tracker.spawn`/`despawn`
+  sends during the tracker tick are in that phase but not in the tracker section.
+- **No packet sections** (companion missing, older than the packets probe, or failed: then `packetsError`): packet
+  counts are unmeasured, not zero.
 
 ## `manifest.json`
 

@@ -7,6 +7,7 @@ from typing import Any
 from .loader import Capture, listener_totals, phases
 from .phases import window_phases
 from .tracker import tracker_window
+from .packets import cause_series, packets_window
 from .providers import key_series, level_at, level_median, magicspells_series, median, series_windows
 from .util import ms, num, pct
 
@@ -49,7 +50,7 @@ def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str
         "igniteNote": _ignite_note(cap),
         "slowCallNote": SLOW_NOTE,
         "tickMatching": None,
-        "windows": [], "lift": _lift(probes, wins, slow, opts.slow_ms, _listener_series(cap), phase_windows),
+        "windows": [], "lift": _lift(probes, wins, slow, opts.slow_ms, _listener_series(cap), phase_windows, cause_series(cap)),
     }
     snaps = (scheduler or {}).get("snapshots", [])
     owner_series = _listener_series(cap)
@@ -64,6 +65,7 @@ def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str
         entry["listeners"] = _listeners_in_window(owner_series, w)
         entry["phases"] = _phases_in_window(ph, phase_windows, w)
         entry["tracker"] = tracker_window(cap, w["fromMillis"], w["ticks"] * w["meanMspt"])
+        entry["packets"] = packets_window(cap, w["fromMillis"], w["ticks"] * w["meanMspt"])
         out["windows"].append(entry)
     return out
 
@@ -505,7 +507,8 @@ def _pending_deltas(before: dict[str, Any] | None, s: dict[str, Any]) -> list[di
 
 
 def _lift(probes: list[Any], wins: list[dict[str, Any]], slow: list[dict[str, Any]], slow_ms: float,
-          listeners: dict[str, Any] | None = None, phase_windows: dict[int, dict[str, Any]] | None = None) -> dict[str, Any]:
+          listeners: dict[str, Any] | None = None, phase_windows: dict[int, dict[str, Any]] | None = None,
+          packet_causes: dict[str, list[float]] | None = None) -> dict[str, Any]:
     """Sections whose per-window time is higher in slow windows than in the other windows."""
     slow_idx = {w["index"] for w in slow}
     other_idx = {w["index"] for w in wins} - slow_idx
@@ -542,11 +545,18 @@ def _lift(probes: list[Any], wins: list[dict[str, Any]], slow: list[dict[str, An
                 ma, mb = sum(a) / len(a), sum(b) / len(b)
                 rows.append({"plugin": "[tick phase]", "section": name, "slowMeanMs": ms(ma), "otherMeanMs": ms(mb),
                              "diffMs": ms(ma - mb), "ratio": round(ma / mb, 2) if mb else None})
+    for cause, nanos in (packet_causes or {}).items():
+        a = [nanos[i] for i in slow_idx if i < len(nanos)]
+        b = [nanos[i] for i in other_idx if i < len(nanos)]
+        if a and b:
+            ma, mb = sum(a) / len(a), sum(b) / len(b)
+            rows.append({"plugin": "[packet sends]", "section": cause, "slowMeanMs": ms(ma), "otherMeanMs": ms(mb),
+                         "diffMs": ms(ma - mb), "ratio": round(ma / mb, 2) if mb else None})
     rows.sort(key=lambda r: r["diffMs"], reverse=True)
     return {"available": True, "slowWindows": len(slow_idx), "otherWindows": len(other_idx),
             "thresholdMs": slow_ms, "sections": rows[:10],
-            "note": ("Mean ms per one-second window: inclusive for probe sections, self for listener rows, exclusive "
-                     "for tick phases. Correlation, not causation.")}
+            "note": ("Mean ms per one-second window: inclusive for probe sections and packet sends by cause, self for "
+                     "listener rows, exclusive for tick phases. Correlation, not causation.")}
 
 
 def _listener_series(cap: Capture) -> dict[str, Any] | None:

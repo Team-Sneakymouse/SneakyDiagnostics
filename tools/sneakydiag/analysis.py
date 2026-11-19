@@ -13,6 +13,7 @@ from .phases import analyze_phases
 from .coverage import analyze_coverage
 from .providers import analyze_provider, slow_records
 from .tracker import analyze_tracker
+from .packets import analyze_packets
 from .util import hist_upper_ns, ms, num, pct, scan_flags, top
 
 STANDARD_COLLECTORS = ("timeline", "scheduler", "phases", "packets", "entities", "plugins", "spark", "connections")
@@ -41,6 +42,7 @@ def analyze(cap: Capture, opts: Options | None = None) -> dict[str, Any]:
         "listeners": analyze_listeners(cap, opts.top),
         "phases": analyze_phases(cap, opts.top),
         "tracker": analyze_tracker(cap, opts.top),
+        "packets": analyze_packets(cap, opts.top),
         "entities": analyze_entities(cap, opts.top),
         "spawns": analyze_spawns(cap, opts.top),
         "spark": analyze_spark_meta(cap),

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from .util import num
+
 
 def table(rows: Iterable[dict[str, Any]], cols: list[tuple[str, str]], indent: str = "  ") -> list[str]:
     """Render dict rows as an aligned table. ``cols`` = [(key, header)]; numbers right-aligned."""
@@ -55,6 +57,7 @@ def render(r: dict[str, Any]) -> str:
     o.extend(_listeners(r.get("listeners")))
     o.extend(_phases(r.get("phases")))
     o.extend(_tracker(r.get("tracker")))
+    o.extend(_packets(r.get("packets")))
     o.extend(_entities(r["entities"]))
     o.extend(_spawns(r.get("spawns")))
     o.extend(_spark(r["spark"]))
@@ -338,6 +341,96 @@ def _tracker(t: dict[str, Any] | None) -> list[str]:
     return o
 
 
+def _packets(p: dict[str, Any] | None) -> list[str]:
+    o = _head("Packets (packets-1.json: outbound classes, send causes, tracker owners, inbound)")
+    if p is None:
+        return o + ["  not recorded (no packets collector in this capture; it needs the Ignite companion, 2026-11): "
+                    "packet counts and send time are absent, not zero"]
+    o.append(f"  reason={p['reason']} complete={p['complete']}  Ignite: {p['availability']}")
+    if not p["available"]:
+        o.append("  " + p["note"])
+        if p.get("error"):
+            o.append(f"  error: {p['error']}")
+        return o
+    ob = p["outbound"]
+    if ob is None:
+        o.append("  outbound: not in this report (unmeasured, not zero)")
+    else:
+        o.append(f"  OBSERVATION {ob['sends']:,.0f} outbound sends ({ob['sendsPerSec']}/s; {ob['otherThreadSends']:,.0f} on other "
+                 f"threads, {ob['otherThreadMs']} ms there) over {ob['observedMillis'] / 1000:g}s: {ob['serverThreadMs']} ms "
+                 f"server-thread send time ({ob['pctOfObservedWall']}% of observed wall time, inclusive); "
+                 f"{ob['bundles']:,.0f} bundles carrying {ob['bundledPackets']:,.0f} packets")
+        flags = ([f"classOverflow (more than the companion's class slots)"] if ob["classOverflow"] else []) + ob["problems"]
+        if ob["nestedSends"]:
+            flags.append(f"{ob['nestedSends']:,.0f} sends nested in other sends (class times overlap; total counts outermost only)")
+        if flags:
+            o.append("  GAP " + "; ".join(flags))
+        if ob["peakWindow"]:
+            pw = ob["peakWindow"]
+            o.append(f"  busiest second: window {pw['window']} with {pw['ms']} ms (median window {pw['medianMs']} ms)")
+        o.append("  packet classes by server-thread send time (inclusive; bundled = sent inside a bundle, not a send):")
+        o += table(ob["topClasses"], [("packetClass", "class"), ("sends", "sends"), ("sendsPerSec", "/s"),
+                                      ("otherThreadSends", "other thr"), ("bundled", "bundled"), ("totalMs", "send ms"),
+                                      ("sharePct", "%"), ("meanUs", "mean us"), ("p99MsUpper", "p99 ms<="),
+                                      ("maxMs", "max ms")], "    ")
+    ca = p["causes"]
+    if ca is None:
+        o.append("  causes: not in this report (unmeasured, not zero)")
+    else:
+        gap = [f"depthOverflow={ca['depthOverflow']:g}"] if ca["depthOverflow"] else []
+        gap += [f"nestingErrors={ca['nestingErrors']:g}"] if ca["nestingErrors"] else []
+        o.append("  send causes by send time (fan-out = packets per call of the cause):" + (f"  GAP {', '.join(gap)}" if gap else ""))
+        o += table(ca["rows"], [("cause", "cause"), ("packets", "packets"), ("broadcasts", "calls"), ("fanOut", "fan-out"),
+                                ("totalMs", "send ms"), ("sharePct", "%"), ("meanUs", "us/packet"),
+                                ("usPerBroadcast", "us/call"), ("maxMs", "max ms")], "    ")
+    tr = p["trackerOwners"]
+    if tr is None:
+        o.append("  tracker owners: not in this report (unmeasured, not zero)")
+    else:
+        gap = [k + "=" + f"{tr[k]:g}" for k in ("overflowEntities", "labelErrors") if tr[k]]
+        o.append(f"  tracker causes by entity type x owner ({tr['totalMs']} ms send time; {tr['spawnsAttributed']:,.0f} of "
+                 f"{tr['spawnLookups']:,.0f} spawns during the capture attributed to a plugin, lookups {tr['spawnLookupMs']} ms, "
+                 f"{tr['passThroughFrames']:,.0f} pass-through frames skipped)" + (f"  GAP {', '.join(gap)}" if gap else "") + ":")
+        o += table(tr["topGroups"], [("entityType", "type"), ("owner", "owner"), ("entities", "entities"),
+                                     ("packets", "packets"), ("broadcasts", "calls"), ("fanOut", "fan-out"),
+                                     ("totalMs", "send ms"), ("sharePct", "%"), ("updateMs", "update ms"),
+                                     ("metadataMs", "metadata ms"), ("spawnMs", "spawn ms"), ("despawnMs", "despawn ms")], "    ")
+        o.append("  tracker causes by owner:")
+        o += table(tr["byOwner"], [("owner", "owner"), ("entities", "entities"), ("packets", "packets"),
+                                   ("fanOut", "fan-out"), ("totalMs", "send ms"), ("sharePct", "%")], "    ")
+        o.append("  " + tr["note"])
+    ib = p["inbound"]
+    if ib is None:
+        o.append("  inbound: not in this report (unmeasured, not zero)")
+    else:
+        gap = (["classOverflow"] if ib["classOverflow"] else []) + \
+              ([f"{ib['offThreadPackets']:,.0f} handled off the server thread (not timed)"] if ib["offThreadPackets"] else [])
+        o.append(f"  inbound: {ib['packets']:,.0f} packets handled on the server thread, {ib['totalMs']} ms "
+                 f"({ib['pctOfObservedWall']}% of observed wall time, inclusive of plugin events); "
+                 f"{ib['betweenTicksPackets']:,.0f} of them between ticks ({ib['betweenTicksMs']} ms)"
+                 + (f"  GAP {'; '.join(gap)}" if gap else ""))
+        o += table(ib["topClasses"], [("packetClass", "class"), ("packets", "packets"), ("packetsPerSec", "/s"),
+                                      ("totalMs", "handle ms"), ("sharePct", "%"), ("meanUs", "mean us"),
+                                      ("p99MsUpper", "p99 ms<="), ("maxMs", "max ms"),
+                                      ("betweenTicksPackets", "between ticks")], "    ")
+    rel = p["relations"]
+    parts = [f"outbound send {rel['outboundSendMs']} ms"
+             + (f" ({rel['outboundPctOfMeasuredTicks']}% of measured tick time)" if rel["outboundPctOfMeasuredTicks"] is not None else "")]
+    if rel["trackerSendChangesSendMs"] is not None:
+        parts.append(f"sends inside sendChanges {rel['trackerSendChangesSendMs']} ms"
+                     + (f" of {rel['trackerSectionMs']} ms Tracker sends ({rel['sendShareOfTrackerSectionPct']}%)"
+                        if rel["trackerSectionMs"] is not None else ""))
+        parts.append(f"pairing sends {rel['trackerPairingSendMs']} ms")
+    if rel["trackerPhaseMs"] is not None:
+        parts.append(f"tracker phases {rel['trackerPhaseMs']} ms (exclusive)")
+    if rel["inboundMs"] is not None:
+        parts.append(f"inbound {rel['inboundMs']} ms" + (f", tick-start-tasks phase {rel['tickStartPhaseMs']} ms"
+                                                          if rel["tickStartPhaseMs"] is not None else ""))
+    o.append("  relations: " + "; ".join(parts))
+    o.append("  " + rel["note"])
+    return o
+
+
 def _entities(e: dict[str, Any] | None) -> list[str]:
     o = _head("Entity census")
     if e is None:
@@ -468,6 +561,13 @@ def _correlation(c: dict[str, Any]) -> list[str]:
             gl = "; ".join(f"{g['entityType']} {g['owner']} {g['ms']} ms" for g in tw["groups"]) or "no series groups"
             o.append(f"    tracker sends: {tw['ms']} ms ({tw['pctOfWindowTickTime']}% of tick time) over {tw['calls']:,.0f} "
                      f"sends; largest: {gl}")
+        pw = w.get("packets")
+        if pw:
+            cl = "; ".join(f"{c['packetClass']} {c['ms']} ms" for c in pw["classes"]) or "no class series"
+            cs = "; ".join(f"{c['cause']} {c['ms']} ms" for c in pw["causes"]) or "no cause series"
+            o.append(f"    packet sends: {pw['ms']} ms ({pw['pctOfWindowTickTime']}% of tick time, inclusive, overlaps the phases) "
+                     f"over {num(pw['sends']):,.0f} sends; classes: {cl}; causes: {cs}"
+                     + (f"; inbound handling {pw['inboundMs']} ms" if pw["inboundMs"] is not None else ""))
         sc = w["scheduler"]
         if sc.get("note"):
             o.append("    scheduler: " + sc["note"])
@@ -523,6 +623,28 @@ def _leads(r: dict[str, Any]) -> list[str]:
         o.append(f"  - Tracker: {g['entityType']} with owner hint '{g['owner']}' has the largest send time ({g['totalMs']} ms, "
                  f"{g['sharePct']}% of tracker sends; metadata {g['metadataMs']} ms). Sends cost even when unchanged; "
                  "test with a controlled change and diff_captures.py.")
+    pk = r.get("packets")
+    if pk and pk.get("available"):
+        ca = pk.get("causes")
+        if ca and ca["rows"] and ca["rows"][0]["totalMs"]:
+            c = ca["rows"][0]
+            o.append(f"  - Packet sends: cause '{c['cause']}' has the most send time ({c['totalMs']} ms, {c['sharePct']}%"
+                     + (f", fan-out {c['fanOut']} packets per call" if c["fanOut"] is not None else "") + ").")
+        ob = pk.get("outbound")
+        if ob and ob["topClasses"]:
+            c = ob["topClasses"][0]
+            o.append(f"  - Packet sends: {c['packetClass']} has the most server-thread send time ({c['totalMs']} ms, "
+                     f"{c['sendsPerSec']}/s); send time includes ProtocolLib and Netty hand-off below Connection.send.")
+        tr = pk.get("trackerOwners")
+        if tr and tr["topGroups"] and tr["topGroups"][0]["totalMs"]:
+            g = tr["topGroups"][0]
+            o.append(f"  - Packet sends: tracker packets of {g['entityType']} owned by '{g['owner']}' cost the most "
+                     f"({g['totalMs']} ms, {g['sharePct']}% of tracker send time, {g['entities']:,.0f} entities).")
+        ib = pk.get("inbound")
+        if ib and ib["topClasses"] and ib["topClasses"][0]["totalMs"]:
+            c = ib["topClasses"][0]
+            o.append(f"  - Inbound packets: {c['packetClass']} handling takes the most time ({c['totalMs']} ms, "
+                     f"{c['sharePct']}% of inbound handling, plugin events included).")
     e = r["entities"]
     if e and e["ownerHintsByCount"]:
         k, v = next(iter(e["ownerHintsByCount"].items()))

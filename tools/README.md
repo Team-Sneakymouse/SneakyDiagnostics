@@ -62,6 +62,18 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
   by type and by owner, with the metadata part, sends per entity, mean, max and p99 bucket bound, and the busiest second.
   Player checks are not included. A report without a `tracker` section (no companion) is shown as unmeasured, not zero;
   window correlation shows each slow window's tracker send time and its largest groups.
+- **Packets** (`packets-1.json` packet sections, 2026-11): three rankings. Packet classes by server-thread send time
+  (inclusive time inside `Connection.send`, so ProtocolLib and the Netty hand-off are in it) with sends per second,
+  other-thread sends, sends inside bundles, mean, p99 bucket bound and max; send causes (tracker update/metadata/spawn/
+  despawn, entity events, broadcasts, particles, chunks, other) by send time with calls and fan-out (packets per call);
+  tracker causes by entity type x owner (`plugin:<name>` when the spawning plugin is known, else the owner hint) and by
+  owner, split into update/metadata/spawn/despawn time. Then inbound packet classes by handling time (inclusive of the
+  plugin events they fire; between-tick handling counted apart), and a relations line that puts outbound send time next
+  to the measured tick time, the sends inside `sendChanges` next to the Tracker sends total and the exclusive
+  `level.<world>.tracker` phases, and inbound handling next to the `tick-start-tasks` phase, with the inclusive/exclusive
+  rules spelled out. Missing sections (no companion, or a companion with only the tracker probe) are unmeasured, not
+  zero. Window correlation shows each slow second's packet send time (inclusive, overlapping the phases) with its
+  largest classes and causes and the inbound handling time; packet causes also enter the slow-vs-other comparison.
 - **Entity census**: segment-combined counts by type and owner hint, tracked-subscription groups, per-world coverage (unreached worlds are unknown, not zero).
 - **Spawns**: entity spawns from the timeline (2026-11) by reason, by spawning plugin (CUSTOM/DEFAULT, a hint) and by reason x type.
   Natural spawning is disabled on this server, so any natural-type reason (NATURAL, CHUNK_GEN, JOCKEY, MOUNT, PATROL, RAID,
@@ -129,8 +141,9 @@ official runtime on real profiles. If spark renumbers fields, update the `F_*` c
 For the controlled-change workflow: capture, change one thing, capture again under comparable load, then compare.
 Tick statistics, probe sections matched by provider + section name (per-observed-second rates, with added/removed flagged), MagicSpells spells and operations,
 Ignite groups, Ignite listener totals (self and inclusive ms per second by owner + listener + event + priority), tick phases (mean us per tick
-and share of the measured tick, per phase), spawns per second by reason x type (x plugin), levels, counts and scheduler pending. A side
-without listener totals, tick phases or spawn counts is reported as "not compared, not zero", and
+and share of the measured tick, per phase), outbound packet classes, packet send causes (with fan-out before and after) and inbound
+packet classes (send or handling ms and packets per observed second), spawns per second by reason x type (x plugin), levels, counts and
+scheduler pending. A side without listener totals, tick phases, packet sections or spawn counts is reported as "not compared, not zero", and
 natural-type spawns in either capture add a warning. The top of the output is a loud block when:
 
 - players, entities or chunks differ by more than `--tolerance` (default 10%), or workload is unknown for either capture (manifest first, else the last spark window, labelled approximate),

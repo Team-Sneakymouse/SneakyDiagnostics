@@ -320,12 +320,14 @@ def v1_capture(root: Path, name: str = "v1", *, providers: list[dict[str, Any]] 
     return d
 
 
-def packets(available: bool = True, **tracker_extra: Any) -> dict[str, Any]:
-    """packets-1.json with a tracker section: displays send in every window, the NPC group spikes in window 2."""
+def packets(available: bool = True, sections: bool = True, **tracker_extra: Any) -> dict[str, Any]:
+    """packets-1.json with a tracker section (displays send in every window, the NPC group spikes in window 2) and,
+    unless ``sections`` is False (a companion with only the tracker probe), the packets probe's sections."""
     doc = {**header("packets", 2), "startedAt": START, "igniteAvailability": "Ignite available, idle", "errors": 0,
            "notes": "x"}
     if not available:
-        return {**doc, "igniteAvailability": "unavailable (companion not installed)", "complete": False}
+        return {**doc, "igniteAvailability": "unavailable (companion not installed)", "complete": False,
+                "packetsAvailability": "unavailable (companion not installed)"}
 
     def group(etype: str, owner: str, ents: int, calls: int, nanos: int, meta: int, max_n: int) -> dict[str, Any]:
         hist = [0] * 41
@@ -348,7 +350,90 @@ def packets(available: bool = True, **tracker_extra: Any) -> dict[str, Any]:
                                      {"entityType": "ITEM_DISPLAY", "owner": "pdc:sneakygrounditems", "nanos": disp},
                                      {"entityType": "ZOMBIE", "owner": "(none)", "nanos": zomb}]}}
     tracker.update(tracker_extra)
-    return {**doc, "tracker": tracker}
+    return {**doc, "tracker": tracker, **(packet_sections() if sections else {}),
+            "packetsAvailability": "Ignite packets available, idle" if sections else "unavailable (companion without the packets probe)"}
+
+
+def _hist(bucket: int, n: int) -> list[int]:
+    h = [0] * 41
+    h[bucket] = n
+    return h
+
+
+def packet_sections(**outbound_extra: Any) -> dict[str, Any]:
+    """The packets probe's sections: entity data and movement dominate outbound, use-item spikes inbound in window 2.
+
+    Sends inside sendChanges (update + metadata, 10 ms) stay below the tracker section's 16 ms.
+    """
+    p = "net.minecraft.network.protocol."
+    sed, move, bundle = p + "game.ClientboundSetEntityDataPacket", p + "game.ClientboundMoveEntityPacket$Pos", p + "game.ClientboundBundlePacket"
+
+    def cls(name: str, sends: int, nanos: int, max_n: int, bucket: int, other: int = 0, other_n: int = 0, bundled: int = 0):
+        return {"packetClass": name, "sends": sends + other, "serverThreadSends": sends, "otherThreadSends": other,
+                "totalNanos": nanos, "maxNanos": max_n, "otherThreadNanos": other_n, "bundled": bundled,
+                "histogramLog2": _hist(bucket, sends)}
+
+    zeros = [0] * 6
+    sed_ns, move_ns, bundle_ns = [600_000, 600_000, 1_600_000, 600_000, 600_000, 0], [1_200_000] * 5 + [0], [600_000] * 5 + [0]
+    outbound = {"observedMillis": 5000, "sends": 10_250, "serverThreadSends": 10_100, "otherThreadSends": 150,
+                "serverThreadNanos": 13_000_000, "classNanos": 13_000_000, "nestedSends": 0, "otherThreadNanos": 300_000,
+                "bundles": 100, "bundledPackets": 100, "lateSends": 0, "maxClasses": 512, "classOverflow": False,
+                "complete": True,
+                "classes": [cls(move, 6000, 6_000_000, 20_000, 9), cls(sed, 4000, 4_000_000, 50_000, 9),
+                            cls(bundle, 100, 3_000_000, 90_000, 14),
+                            cls(p + "common.ClientboundKeepAlivePacket", 0, 0, 0, 0, other=150, other_n=300_000),
+                            cls(p + "game.ClientboundAddEntityPacket", 0, 0, 0, 0, bundled=100)],
+                "series": {"windowMillis": 1000, "sends": [2020] * 5 + [0],
+                           "nanos": [a + b + c for a, b, c in zip(sed_ns, move_ns, bundle_ns)],
+                           "classes": [{"packetClass": move, "sends": [1200] * 5 + [0], "nanos": move_ns},
+                                       {"packetClass": sed, "sends": [800] * 5 + [0], "nanos": sed_ns},
+                                       {"packetClass": bundle, "sends": [20] * 5 + [0], "nanos": bundle_ns}]}}
+    outbound.update(outbound_extra)
+
+    def cause(name: str, packets_: int, broadcasts: int, nanos: int, max_n: int = 0) -> dict[str, Any]:
+        row = {"cause": name, "packets": packets_, "totalNanos": nanos, "maxNanos": max_n}
+        if name != "other":
+            row["broadcasts"] = broadcasts
+        return row
+
+    causes = {"maxDepth": 32, "depthOverflow": 0, "nestingErrors": 0, "complete": True,
+              "rows": [cause("tracker.update", 6000, 3000, 6_000_000, 20_000), cause("tracker.metadata", 4000, 4000, 4_000_000, 50_000),
+                       cause("tracker.spawn", 100, 100, 3_000_000, 90_000), cause("tracker.despawn", 0, 20, 0),
+                       cause("other", 0, 0, 0), cause("entity.event", 0, 0, 0), cause("broadcast", 0, 0, 0),
+                       cause("particles", 0, 0, 0), cause("chunks", 0, 0, 0)],
+              "series": {"windowMillis": 1000, "causes": [
+                  {"cause": "tracker.update", "packets": [1200] * 5 + [0], "nanos": move_ns},
+                  {"cause": "tracker.metadata", "packets": [800] * 5 + [0], "nanos": sed_ns},
+                  {"cause": "tracker.spawn", "packets": [20] * 5 + [0], "nanos": bundle_ns},
+                  *({"cause": c, "packets": zeros, "nanos": zeros} for c in ("tracker.despawn", "other", "entity.event",
+                                                                            "broadcast", "particles", "chunks"))]}}
+
+    def cell(packets_: int, broadcasts: int, nanos: int) -> dict[str, int]:
+        return {"packets": packets_, "broadcasts": broadcasts, "totalNanos": nanos}
+
+    tracker_causes = {"entities": 148, "maxGroups": 512, "overflowEntities": 0, "labelErrors": 0, "spawnLookups": 120,
+                      "spawnsAttributed": 100, "spawnLookupNanos": 2_400_000, "passThroughFrames": 100, "complete": True,
+                      "groups": [
+                          {"entityType": "ITEM_DISPLAY", "owner": "plugin:SneakyWartime", "entities": 100, "packets": 8000,
+                           "broadcasts": 6000, "totalNanos": 8_000_000,
+                           "causes": {"tracker.update": cell(4000, 2000, 4_000_000), "tracker.metadata": cell(4000, 4000, 4_000_000)}},
+                          {"entityType": "PLAYER", "owner": "(player)", "entities": 48, "packets": 2100, "broadcasts": 1120,
+                           "totalNanos": 5_000_000,
+                           "causes": {"tracker.update": cell(2000, 1000, 2_000_000), "tracker.spawn": cell(100, 100, 3_000_000),
+                                      "tracker.despawn": cell(0, 20, 0)}}]}
+    use, mv = p + "game.ServerboundUseItemPacket", p + "game.ServerboundMovePlayerPacket$Pos"
+    use_ns, mv_ns = [6_000_000, 6_000_000, 16_000_000, 6_000_000, 6_000_000, 0], [1_000_000] * 5 + [0]
+    inbound = {"observedMillis": 5000, "packets": 5500, "totalNanos": 45_000_000, "betweenTicksPackets": 10,
+               "betweenTicksNanos": 500_000, "offThreadPackets": 0, "latePackets": 0, "classOverflow": False, "complete": True,
+               "classes": [{"packetClass": use, "packets": 500, "totalNanos": 40_000_000, "maxNanos": 2_000_000,
+                            "betweenTicksPackets": 10, "betweenTicksNanos": 500_000, "histogramLog2": _hist(16, 500)},
+                           {"packetClass": mv, "packets": 5000, "totalNanos": 5_000_000, "maxNanos": 20_000,
+                            "betweenTicksPackets": 0, "betweenTicksNanos": 0, "histogramLog2": _hist(9, 5000)}],
+               "series": {"windowMillis": 1000, "packets": [1100] * 5 + [0],
+                          "nanos": [a + b for a, b in zip(use_ns, mv_ns)],
+                          "classes": [{"packetClass": use, "packets": [100] * 5 + [0], "nanos": use_ns},
+                                      {"packetClass": mv, "packets": [1000] * 5 + [0], "nanos": mv_ns}]}}
+    return {"outbound": outbound, "causes": causes, "trackerCauses": tracker_causes, "inbound": inbound}
 
 
 def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total: int = 1000, chunks: int = 500,

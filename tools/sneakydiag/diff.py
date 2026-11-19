@@ -6,7 +6,8 @@ from typing import Any
 
 from .analysis import Options, analyze
 from .listeners import short
-from .loader import Capture, listener_totals, phases, spawns
+from .loader import Capture, listener_totals, packets, phases, spawns
+from .packets import short as short_packet
 from .spawns import NATURAL_REASONS
 from .providers import recover_spells
 from .sparkwire import ProfileError, read_profile
@@ -58,6 +59,7 @@ def extract(cap: Capture) -> dict[str, Any]:
         "result": r, "workload": workload_of(cap), "timeline": tl,
         "sections": {}, "levels": {}, "counts": {}, "freeform": {}, "scheduler": {}, "providers": {},
         "listeners": {}, "spawns": {}, "listenerTotals": False, "spawnCounts": False, "phases": None,
+        "packetClasses": None, "packetCauses": None, "inboundClasses": None,
     }
     ph = phases(cap)
     if ph is not None and ph["available"]:
@@ -69,6 +71,21 @@ def extract(cap: Capture) -> dict[str, Any]:
         rows["other"] = {"us": sum(ph["other"][i] for i in known), "measuredUs": sum(ph["other"][i] for i in known)}
         m["phases"] = {"rows": rows, "ticks": len(ph["ticks"]), "measuredTicks": len(known),
                        "measuredUs": sum(ph["measured"][i] for i in known), "complete": ph["phasesComplete"]}
+    pk = packets(cap)
+    if pk is not None:
+        ob, ca, ib = pk["outbound"], pk["causes"], pk["inbound"]
+        if ob is not None:
+            m["packetClasses"] = {("outbound", short_packet(c["packetClass"])): {
+                "totalNanos": c["totalNanos"], "calls": c["sends"], "spanMs": ob["observedMillis"], "inclusive": True}
+                for c in ob["classes"]}
+        if ca is not None:
+            span = (ob or {}).get("observedMillis") or observed_ms
+            m["packetCauses"] = {("cause", r["cause"]): {"totalNanos": r["totalNanos"], "calls": r["packets"], "spanMs": span,
+                                                         "broadcasts": r["broadcasts"], "inclusive": True} for r in ca["rows"]}
+        if ib is not None:
+            m["inboundClasses"] = {("inbound", short_packet(c["packetClass"])): {
+                "totalNanos": c["totalNanos"], "calls": c["packets"], "spanMs": ib["observedMillis"], "inclusive": True}
+                for c in ib["classes"]}
     lt = listener_totals(cap)
     if lt is not None:
         m["listenerTotals"] = True
@@ -172,11 +189,24 @@ def compare(before: Capture, after: Capture, *, tolerance: float = 0.10, top: in
     out["spawnsNote"] = _missing_note("spawn counts", b["spawnCounts"], a["spawnCounts"])
     out["phases"] = _phase_deltas(b["phases"], a["phases"], top) if b["phases"] and a["phases"] else None
     out["phasesNote"] = _missing_note("tick phases", b["phases"] is not None, a["phases"] is not None)
+    for key, what in (("packetClasses", "outbound packet classes"), ("packetCauses", "packet send causes"),
+                      ("inboundClasses", "inbound packet classes")):
+        out[key] = _rate_deltas(b[key], a[key], top, ("totalNanos",)) if b[key] is not None and a[key] is not None else None
+        out[key + "Note"] = _missing_note(what, b[key] is not None, a[key] is not None)
+    if out["packetCauses"] is not None:
+        for row in out["packetCauses"]["top"]:
+            rb, ra = b["packetCauses"].get(("cause", row["name"])), a["packetCauses"].get(("cause", row["name"]))
+            row["fanOutBefore"] = _fan_out(rb)
+            row["fanOutAfter"] = _fan_out(ra)
     out["scheduler"] = [{"metric": k, "before": b["scheduler"].get(k), "after": a["scheduler"].get(k)}
                         for k in sorted(set(b["scheduler"]) | set(a["scheduler"]))
                         if k.startswith("pending") or abs(num(a["scheduler"].get(k)) - num(b["scheduler"].get(k))) > 0][:top + 2]
     out["comparable"] = not any(w["severity"] == "blocker" for w in out["warnings"])
     return out
+
+
+def _fan_out(r: dict[str, Any] | None) -> float | None:
+    return round(r["calls"] / r["broadcasts"], 2) if r and r.get("broadcasts") else None
 
 
 def _missing_note(what: str, before: bool, after: bool) -> str | None:
@@ -449,6 +479,22 @@ def render_diff(d: dict[str, Any]) -> str:
                                ("usPerTickAfter", "us/tick after"), ("deltaUsPerTick", "delta"),
                                ("pctOfMeasuredBefore", "% before"), ("pctOfMeasuredAfter", "% after")])
         o.append("  " + pd["note"])
+    for title, key, extra in (
+            ("Outbound packet classes (packets-1.json; server-thread send ms and sends per observed second, inclusive)",
+             "packetClasses", []),
+            ("Packet send causes (send ms per observed second, inclusive; fan-out = packets per call)", "packetCauses",
+             [("fanOutBefore", "fan-out before"), ("fanOutAfter", "fan-out after")]),
+            ("Inbound packet classes (handling ms per observed second, inclusive of plugin events)", "inboundClasses", [])):
+        o += ["", title]
+        sec = d.get(key)
+        if sec is None:
+            o.append("  " + (d.get(key + "Note") or "unavailable"))
+            continue
+        o.append(f"  {sec['matched']} matched, {sec['added']} only in after, {sec['removed']} only in before")
+        o += table(sec["top"], [("name", "class" if key != "packetCauses" else "cause"), ("status", "status"),
+                                ("totalMsPerSecBefore", "ms/s before"), ("totalMsPerSecAfter", "ms/s after"),
+                                ("totalDeltaMsPerSec", "delta"), ("callsPerSecBefore", "/s before"),
+                                ("callsPerSecAfter", "/s after"), *extra])
     o += ["", "Spawns (timeline; spawned per observed second, cancelled spawns excluded)"]
     if d.get("spawns") is None:
         o.append("  " + (d.get("spawnsNote") or "unavailable"))

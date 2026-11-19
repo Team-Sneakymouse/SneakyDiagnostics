@@ -598,3 +598,107 @@ def spawns(cap: Capture) -> dict[str, Any] | None:
             "droppedOffThread": _n(sp.get("droppedOffThread")), "complete": sp.get("complete"),
             "windowMillis": int(window) if isinstance(window, int) and window > 0 else 1000,
             "attributedReasons": [str(x) for x in sp.get("attributedReasons") or [] if isinstance(x, str)]}
+
+
+PACKET_CAUSES = ("other", "tracker.update", "tracker.metadata", "tracker.spawn", "tracker.despawn", "entity.event",
+                 "broadcast", "particles", "chunks")
+TRACKER_CAUSES = ("tracker.update", "tracker.metadata", "tracker.spawn", "tracker.despawn")
+
+
+def _hist(v: Any) -> list[float] | None:
+    h = _numbers(v)
+    return h if h is not None and len(h) <= 64 else None
+
+
+def _series_rows(raw: Any, key: str, fields: tuple[str, ...]) -> dict[str, dict[str, list[float]]]:
+    """``[{key: name, field: [..], ...}]`` -> name -> field -> numbers (rows with mismatched lengths are dropped)."""
+    out: dict[str, dict[str, list[float]]] = {}
+    for row in raw if isinstance(raw, list) else ():
+        if not isinstance(row, dict) or not isinstance(row.get(key), str):
+            continue
+        cols = {f: _numbers(row.get(f)) for f in fields}
+        if all(c is not None for c in cols.values()) and len({len(c) for c in cols.values()}) == 1:  # type: ignore[arg-type]
+            out[row[key]] = cols  # type: ignore[assignment]
+    return out
+
+
+def _window_millis(series: dict[str, Any]) -> int:
+    w = series.get("windowMillis")
+    return int(w) if isinstance(w, int) and not isinstance(w, bool) and w > 0 else 1000
+
+
+def packets(cap: Capture) -> dict[str, Any] | None:
+    """The packet sections of ``packets-1.json`` (Ignite ``packets`` probe, 2026-11), normalized.
+
+    None when the capture has no packets report (collector not run). Otherwise a dict with the header fields and
+    ``outbound``, ``causes``, ``trackerCauses`` and ``inbound``, each None when that section is absent (companion
+    missing, older than the packets probe, or failed: unmeasured, not zero).
+    """
+    r = cap.report("packets")
+    if r is None:
+        return None
+    out: dict[str, Any] = {"reason": r.get("reason"), "complete": r.get("complete"),
+                           "availability": r.get("packetsAvailability"), "error": r.get("packetsError"),
+                           "outbound": None, "causes": None, "trackerCauses": None, "inbound": None}
+    ob = r.get("outbound")
+    if isinstance(ob, dict):
+        classes = []
+        for c in ob.get("classes") or []:
+            if isinstance(c, dict) and isinstance(c.get("packetClass"), str):
+                classes.append({"packetClass": c["packetClass"], **{k: _n(c.get(k)) for k in (
+                    "sends", "serverThreadSends", "otherThreadSends", "totalNanos", "maxNanos", "otherThreadNanos", "bundled")},
+                    "histogramLog2": _hist(c.get("histogramLog2"))})
+        s = ob.get("series") if isinstance(ob.get("series"), dict) else {}
+        out["outbound"] = {**{k: _n(ob.get(k)) for k in (
+            "observedMillis", "sends", "serverThreadSends", "otherThreadSends", "serverThreadNanos", "classNanos",
+            "nestedSends", "otherThreadNanos", "bundles", "bundledPackets", "lateSends", "maxClasses")},
+            "classOverflow": ob.get("classOverflow") is True, "complete": ob.get("complete"), "classes": classes,
+            "series": {"windowMillis": _window_millis(s), "sends": _numbers(s.get("sends")) or [],
+                       "nanos": _numbers(s.get("nanos")) or [],
+                       "classes": _series_rows(s.get("classes"), "packetClass", ("sends", "nanos"))}}
+    ca = r.get("causes")
+    if isinstance(ca, dict):
+        rows = []
+        for c in ca.get("rows") or []:
+            if isinstance(c, dict) and isinstance(c.get("cause"), str):
+                b = c.get("broadcasts")
+                rows.append({"cause": c["cause"], "packets": _n(c.get("packets")), "totalNanos": _n(c.get("totalNanos")),
+                             "maxNanos": _n(c.get("maxNanos")),
+                             "broadcasts": _n(b) if isinstance(b, (int, float)) and not isinstance(b, bool) else None})
+        s = ca.get("series") if isinstance(ca.get("series"), dict) else {}
+        out["causes"] = {"rows": rows, "depthOverflow": _n(ca.get("depthOverflow")), "nestingErrors": _n(ca.get("nestingErrors")),
+                         "complete": ca.get("complete"),
+                         "series": {"windowMillis": _window_millis(s),
+                                    "causes": _series_rows(s.get("causes"), "cause", ("packets", "nanos"))}}
+    tc = r.get("trackerCauses")
+    if isinstance(tc, dict):
+        groups = []
+        for g in tc.get("groups") or []:
+            if not isinstance(g, dict):
+                continue
+            causes = {}
+            for name, cell in (g.get("causes") or {}).items() if isinstance(g.get("causes"), dict) else ():
+                if isinstance(cell, dict) and name in TRACKER_CAUSES:
+                    causes[name] = {k: _n(cell.get(k)) for k in ("packets", "broadcasts", "totalNanos")}
+            groups.append({"entityType": str(g.get("entityType")), "owner": str(g.get("owner")),
+                           **{k: _n(g.get(k)) for k in ("entities", "packets", "broadcasts", "totalNanos")}, "causes": causes})
+        out["trackerCauses"] = {"groups": groups, "complete": tc.get("complete"), **{k: _n(tc.get(k)) for k in (
+            "entities", "maxGroups", "overflowEntities", "labelErrors", "spawnLookups", "spawnsAttributed",
+            "spawnLookupNanos", "passThroughFrames")}}
+    ib = r.get("inbound")
+    if isinstance(ib, dict):
+        classes = []
+        for c in ib.get("classes") or []:
+            if isinstance(c, dict) and isinstance(c.get("packetClass"), str):
+                classes.append({"packetClass": c["packetClass"], **{k: _n(c.get(k)) for k in (
+                    "packets", "totalNanos", "maxNanos", "betweenTicksPackets", "betweenTicksNanos")},
+                    "histogramLog2": _hist(c.get("histogramLog2"))})
+        s = ib.get("series") if isinstance(ib.get("series"), dict) else {}
+        out["inbound"] = {**{k: _n(ib.get(k)) for k in (
+            "observedMillis", "packets", "totalNanos", "betweenTicksPackets", "betweenTicksNanos", "offThreadPackets",
+            "latePackets")}, "classOverflow": ib.get("classOverflow") is True, "complete": ib.get("complete"),
+            "classes": classes,
+            "series": {"windowMillis": _window_millis(s), "packets": _numbers(s.get("packets")) or [],
+                       "nanos": _numbers(s.get("nanos")) or [],
+                       "classes": _series_rows(s.get("classes"), "packetClass", ("packets", "nanos"))}}
+    return out
