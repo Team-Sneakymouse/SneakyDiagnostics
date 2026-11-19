@@ -415,3 +415,98 @@ def _finish(cap: Capture) -> None:
         cap.warnings.append(f"files carry different captureIds: {sorted(map(str, ids))}")
     if not cap.reports and not cap.manifest:
         cap.warnings.append("no SneakyDiagnostics report files found in this folder")
+
+
+# --------------------------------------------------------------------------- compatible additions (2026-11)
+#
+# Fields added to existing reports without a schema version change. Each accessor returns None when the writer
+# predates the field (unknown, never zero) and drops malformed entries instead of failing. Memory stays proportional
+# to the list lengths in the file, never to the values in it.
+
+def _n(v: Any) -> float:
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+
+def _numbers(v: Any) -> list[float] | None:
+    return [_n(x) for x in v] if isinstance(v, list) else None
+
+
+def _ignite(cap: Capture) -> dict[str, Any]:
+    s = cap.report("scheduler") or {}
+    return s.get("ignite") if isinstance(s.get("ignite"), dict) else {}
+
+
+def listener_totals(cap: Capture) -> dict[str, Any] | None:
+    """Ignite ``listenerTotals`` (scheduler report): every listener call per owner x listener x event x priority x async.
+
+    Rows carry calls, inclusive ``totalNanos`` (all threads), server-thread ``selfNanos`` (nested listener calls
+    subtracted), ``maxNanos``, other-thread calls/nanos and ``histogramLog2``. ``series.owners`` holds per-second
+    server-thread total/self nanos per owner plugin. None when the companion predates listener totals.
+    """
+    lt = _ignite(cap).get("listenerTotals")
+    if not isinstance(lt, dict):
+        return None
+    rows = []
+    for r in lt.get("rows") or []:
+        if not isinstance(r, dict):
+            continue
+        hist = _numbers(r.get("histogramLog2"))
+        rows.append({"owner": str(r.get("owner")), "listenerClass": str(r.get("listenerClass")),
+                     "eventClass": str(r.get("eventClass")), "priority": str(r.get("priority")),
+                     "asyncEvent": r.get("asyncEvent") is True, "calls": _n(r.get("calls")),
+                     "totalNanos": _n(r.get("totalNanos")), "selfNanos": _n(r.get("selfNanos")),
+                     "maxNanos": _n(r.get("maxNanos")), "otherThreadCalls": _n(r.get("otherThreadCalls")),
+                     "otherThreadNanos": _n(r.get("otherThreadNanos")),
+                     "histogramLog2": hist if hist is not None and len(hist) <= 64 else None})
+    raw_series = lt.get("series") if isinstance(lt.get("series"), dict) else {}
+    owners = {}
+    for name, s in (raw_series.get("owners") or {}).items() if isinstance(raw_series.get("owners"), dict) else ():
+        if not isinstance(s, dict):
+            continue
+        total, self_ = _numbers(s.get("totalNanos")), _numbers(s.get("selfNanos"))
+        if total is not None and self_ is not None and len(total) == len(self_):
+            owners[str(name)] = {"totalNanos": total, "selfNanos": self_}
+    overflow = lt.get("overflow") if isinstance(lt.get("overflow"), dict) else {}
+    window = raw_series.get("windowMillis")
+    return {"rows": rows, "keys": _n(lt.get("keys")), "maxKeys": lt.get("maxKeys"),
+            "overflowCalls": _n(overflow.get("calls")), "overflowNanos": _n(overflow.get("totalNanos")),
+            "nestingOverflow": _n(lt.get("nestingOverflow")), "complete": lt.get("complete"),
+            "series": {"windowMillis": int(window) if isinstance(window, int) and window > 0 else 1000,
+                       "owners": owners, "omittedOwners": _n(raw_series.get("omittedOwners"))}}
+
+
+def group_histogram(group: dict[str, Any]) -> list[float] | None:
+    """An Ignite execution group's ``histogramLog2`` (completed scopes by floor(log2 nanos)); None before 2026-11."""
+    hist = _numbers(group.get("histogramLog2"))
+    return hist if hist is not None and len(hist) <= 64 else None
+
+
+def spawns(cap: Capture) -> dict[str, Any] | None:
+    """The timeline's ``spawns``: entity spawns by reason x entity type (x plugin for CUSTOM/DEFAULT spawns).
+
+    Each row's ``windows`` maps window index -> spawns in that one-second window (sparse; cancelled spawns have no
+    window). None when the timeline predates spawn counts.
+    """
+    t = cap.report("timeline") or {}
+    sp = t.get("spawns")
+    if not isinstance(sp, dict):
+        return None
+    rows = []
+    for r in sp.get("rows") or []:
+        if not isinstance(r, dict):
+            continue
+        ws, ns = r.get("windows"), r.get("n")
+        windows: dict[int, float] = {}
+        if isinstance(ws, list) and isinstance(ns, list) and len(ws) == len(ns):
+            for w, n in zip(ws, ns):
+                if isinstance(w, int) and not isinstance(w, bool) and w >= 0:
+                    windows[w] = windows.get(w, 0) + _n(n)
+        plugin = r.get("plugin")
+        rows.append({"reason": str(r.get("reason")), "entityType": str(r.get("entityType")),
+                     "plugin": plugin if isinstance(plugin, str) else None, "total": _n(r.get("total")),
+                     "cancelled": _n(r.get("cancelled")), "windows": windows})
+    window = sp.get("windowMillis")
+    return {"rows": rows, "observed": _n(sp.get("observed")), "overflow": _n(sp.get("overflow")),
+            "droppedOffThread": _n(sp.get("droppedOffThread")), "complete": sp.get("complete"),
+            "windowMillis": int(window) if isinstance(window, int) and window > 0 else 1000,
+            "attributedReasons": [str(x) for x in sp.get("attributedReasons") or [] if isinstance(x, str)]}

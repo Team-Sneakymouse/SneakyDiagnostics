@@ -4,13 +4,13 @@ from __future__ import annotations
 import bisect
 from typing import Any
 
-from .loader import Capture
+from .loader import Capture, listener_totals
 from .providers import key_series, level_at, level_median, magicspells_series, median, series_windows
 from .util import ms, num, pct
 
 NOTE = ("Observations only. A section that is busy in a slow window may be a cause, a symptom, or unrelated. "
         "Section times are INCLUSIVE per section and overlap their parents/children, so they are not additive and "
-        "can exceed the window's tick time. Only the 16 busiest sections per provider have a series; a section "
+        "can exceed the window's tick time. Only the busiest sections per provider (up to 64, fewer in long captures) have a series; a section "
         "missing from a window's list is unknown, not zero. Counts and levels in a window are what the provider "
         "counted or sampled in that second; a level with no sample there is left out (unknown), and keys named as "
         "omitted had no room in the report.")
@@ -44,9 +44,10 @@ def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str
         "igniteNote": _ignite_note(cap),
         "slowCallNote": SLOW_NOTE,
         "tickMatching": None,
-        "windows": [], "lift": _lift(probes, wins, slow, opts.slow_ms),
+        "windows": [], "lift": _lift(probes, wins, slow, opts.slow_ms, _listener_series(cap)),
     }
     snaps = (scheduler or {}).get("snapshots", [])
+    owner_series = _listener_series(cap)
     calls = slow_calls(cap)
     ticks = TickRanges(wins)
     out["tickMatching"] = ticks.status
@@ -56,6 +57,7 @@ def correlate(cap: Capture, timeline: dict[str, Any] | None, scheduler: dict[str
         entry = _window(w, probes, snaps, scheduler)
         entry["magicSpells"] = [_spells_in_window(p, mss, w) for p, mss in spells]
         entry["slowCalls"] = _calls_in_window(calls, w, ticks, measured)
+        entry["listeners"] = _listeners_in_window(owner_series, w)
         out["windows"].append(entry)
     return out
 
@@ -470,7 +472,8 @@ def _pending_deltas(before: dict[str, Any] | None, s: dict[str, Any]) -> list[di
     return sorted(d, key=lambda r: abs(r["delta"]), reverse=True)[:3]
 
 
-def _lift(probes: list[Any], wins: list[dict[str, Any]], slow: list[dict[str, Any]], slow_ms: float) -> dict[str, Any]:
+def _lift(probes: list[Any], wins: list[dict[str, Any]], slow: list[dict[str, Any]], slow_ms: float,
+          listeners: dict[str, Any] | None = None) -> dict[str, Any]:
     """Sections whose per-window time is higher in slow windows than in the other windows."""
     slow_idx = {w["index"] for w in slow}
     other_idx = {w["index"] for w in wins} - slow_idx
@@ -490,7 +493,51 @@ def _lift(probes: list[Any], wins: list[dict[str, Any]], slow: list[dict[str, An
                 ma, mb = sum(a) / len(a), sum(b) / len(b)
                 rows.append({"plugin": p.plugin, "section": name, "slowMeanMs": ms(ma), "otherMeanMs": ms(mb),
                              "diffMs": ms(ma - mb), "ratio": round(ma / mb, 2) if mb else None})
+    if listeners and listeners["windowMillis"] == 1000:
+        for owner, s in listeners["owners"].items():
+            a = [s["selfNanos"][i] for i in slow_idx if i < len(s["selfNanos"])]
+            b = [s["selfNanos"][i] for i in other_idx if i < len(s["selfNanos"])]
+            if a and b:
+                ma, mb = sum(a) / len(a), sum(b) / len(b)
+                rows.append({"plugin": owner, "section": "[listener self time]", "slowMeanMs": ms(ma),
+                             "otherMeanMs": ms(mb), "diffMs": ms(ma - mb), "ratio": round(ma / mb, 2) if mb else None})
     rows.sort(key=lambda r: r["diffMs"], reverse=True)
     return {"available": True, "slowWindows": len(slow_idx), "otherWindows": len(other_idx),
             "thresholdMs": slow_ms, "sections": rows[:10],
-            "note": "Mean inclusive ms per one-second window. Correlation, not causation."}
+            "note": ("Mean ms per one-second window: inclusive for probe sections, self for listener rows. "
+                     "Correlation, not causation.")}
+
+
+def _listener_series(cap: Capture) -> dict[str, Any] | None:
+    """Ignite per-owner listener series (server-thread total/self nanos per second), or None."""
+    lt = listener_totals(cap)
+    if lt is None or not lt["series"]["owners"]:
+        return None
+    return lt["series"]
+
+
+LISTENER_NOTE = ("Ignite listener time of each owner plugin in this second (server thread; self excludes nested listener "
+                 "calls, so self times add up across owners; ServerTickEndEvent listeners run after the tick was "
+                 "measured and may push self above the tick time).")
+
+
+def _listeners_in_window(series: dict[str, Any] | None, w: dict[str, Any]) -> dict[str, Any] | None:
+    """The owners with the most listener self time in the window, against their median second."""
+    if series is None:
+        return None
+    idx = int(w["fromMillis"] // series["windowMillis"])
+    tick_ms = w["ticks"] * w["meanMspt"]
+    rows = []
+    for owner, s in series["owners"].items():
+        if idx >= len(s["selfNanos"]):
+            continue
+        here, med = s["selfNanos"][idx], median(s["selfNanos"])
+        if not here and not s["totalNanos"][idx]:
+            continue
+        rows.append({"owner": owner, "selfMs": ms(here), "totalMsInclusive": ms(s["totalNanos"][idx]),
+                     "pctOfWindowTickTime": pct(here / 1e6, tick_ms), "medianWindowSelfMs": ms(med),
+                     "xMedian": round(here / med, 2) if med else None})
+    rows.sort(key=lambda r: r["selfMs"], reverse=True)
+    return {"owners": rows[:6], "selfMs": ms(sum(s["selfNanos"][idx] for s in series["owners"].values()
+                                                if idx < len(s["selfNanos"]))),
+            "note": LISTENER_NOTE}

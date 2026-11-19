@@ -16,9 +16,12 @@ import java.util.function.LongSupplier;
 /** Bounded capture state owned only by the server's companion classloader. */
 public final class SchedulerProbe {
     static final int MAX_GROUPS = 2048, MAX_TASK_IDS = 100_000;
-    /** Slow calls: at or above 1 ms (2% of a 50 ms tick), the 512 longest of each kind, 32 still running at stop. */
+    /**
+     * Slow calls: at or above 1 ms (2% of a 50 ms tick). Each kind keeps its longest {@link #slowCapacity} calls:
+     * {@code max(512, 64 x capture seconds)}, at most 16,384 (about 3 MB of records). 32 still running at stop.
+     */
     static final long SLOW_NANOS = 1_000_000L;
-    static final int MAX_SLOW_EXECUTIONS = 512, MAX_SLOW_LISTENERS = 512, MAX_RUNNING_AT_STOP = 32;
+    static final int MIN_SLOW_CALLS = 512, SLOW_CALLS_PER_SECOND = 64, MAX_SLOW_CALLS = 16_384, MAX_RUNNING_AT_STOP = 32;
     /** Measured tick intervals kept per capture second (20 ticks/s with room for faster ticking); more are counted. */
     static final int MEASURED_TICKS_PER_SECOND = 40;
     private static final StackWalker WALKER = StackWalker.getInstance();
@@ -29,6 +32,12 @@ public final class SchedulerProbe {
     private record Key(String event, String owner, String taskClass, boolean sync, String caller) {}
     private static final class Totals {
         long started, completed, throwing, totalNanos, maxNanos, firstOffsetMillis, lastOffsetMillis;
+        /** Completed scopes by {@code floor(log2(nanos))}, the shared probe's buckets. */
+        final long[] histogram = new long[ListenerTotals.BUCKETS];
+    }
+    /** Slow-call list capacity for a capture of this length. */
+    static int slowCapacity(int seconds) {
+        return (int) Math.min(MAX_SLOW_CALLS, Math.max(MIN_SLOW_CALLS, (long) SLOW_CALLS_PER_SECOND * Math.max(0, seconds)));
     }
     public record Cancellation(Session session, int taskId, Identity identity, String caller, Cancellation previous, Token token) {}
     public record Token(Session session, Key key, long startedNanos) {}
@@ -107,19 +116,41 @@ public final class SchedulerProbe {
         long now = session.clock.getAsLong();
         if (now - session.deadline >= 0) return 0;
         session.listenerCalls.increment();
-        if (Thread.currentThread() == session.serverThread) session.serverListenerDepth++;
+        if (Thread.currentThread() == session.serverThread) {
+            int depth = ++session.serverListenerDepth;
+            if (depth >= 1 && depth <= ListenerTotals.MAX_DEPTH) session.childNanos[depth] = 0;
+        }
         return now == 0 ? 1 : now;
     }
+    /** The recording capture's listener totals (for the mixin's slot cache), or null. One volatile read. */
+    public static ListenerTotals listenerTotals() {
+        Session session = current;
+        return session == null ? null : session.listenerTotals;
+    }
+    /** As {@link #listenerEnd(long, ListenerTotals.Slot)} without a totals slot (tests). */
+    public static long listenerEnd(long started) { return listenerEnd(started, null); }
     /**
      * The call's duration if it was slow enough to record (then call {@link #slowListener}, which counts it as ended),
      * otherwise -1 (a fast call is counted as ended here). A call whose capture stopped first is never counted as ended:
-     * the stopped report already lists it as running at stop.
+     * the stopped report already lists it as running at stop. The call is added to its {@code slot}'s totals; on the
+     * server thread its self time excludes the nested listener calls that ended inside it. No allocation.
      */
-    public static long listenerEnd(long started) {
+    public static long listenerEnd(long started, ListenerTotals.Slot slot) {
         Session session = current;
         if (started == 0 || session == null || session.closed || started - session.startedNanos < 0) return -1;
-        long elapsed = session.clock.getAsLong() - started;
-        if (Thread.currentThread() == session.serverThread) session.serverListenerDepth--;
+        long now = session.clock.getAsLong();
+        long elapsed = now - started;
+        boolean counted = slot != null && slot.totals == session.listenerTotals;
+        if (Thread.currentThread() == session.serverThread) {
+            int depth = session.serverListenerDepth--;
+            long self = elapsed;
+            if (depth >= 1 && depth <= ListenerTotals.MAX_DEPTH) self -= session.childNanos[depth];
+            else if (depth > ListenerTotals.MAX_DEPTH) session.nestingOverflow++;
+            if (depth - 1 >= 1 && depth - 1 <= ListenerTotals.MAX_DEPTH) session.childNanos[depth - 1] += elapsed;
+            if (counted) session.listenerTotals.server(slot, elapsed, self, now);
+        } else if (counted) {
+            session.listenerTotals.other(slot, elapsed);
+        }
         if (session.slowListeners.slow(elapsed)) return elapsed;
         session.listenerEnded.increment();
         return -1;
@@ -161,7 +192,7 @@ public final class SchedulerProbe {
                 && !frame.getClassName().startsWith("org.bukkit.scheduler."))
                 .limit(16).findFirst().map(frame -> label(frame.getClassName() + "#" + frame.getMethodName() + ":" + frame.getLineNumber())).orElse("<unknown>"));
     }
-    private static String label(String value) { return value == null ? "<unknown>" : value.length() <= 192 ? value : value.substring(0, 192); }
+    static String label(String value) { return value == null ? "<unknown>" : value.length() <= 192 ? value : value.substring(0, 192); }
 
     static final class Session {
         final String id;
@@ -172,12 +203,16 @@ public final class SchedulerProbe {
         final Map<Integer, Identity> identities = new HashMap<>();
         final Map<Integer, Long> cancellations = new HashMap<>();
         final Set<Token> running = Collections.newSetFromMap(new IdentityHashMap<>());
-        final SlowRecords slowExecutions = new SlowRecords(SLOW_NANOS, MAX_SLOW_EXECUTIONS);
-        final SlowRecords slowListeners = new SlowRecords(SLOW_NANOS, MAX_SLOW_LISTENERS);
+        final int slowCapacity;
+        final SlowRecords slowExecutions, slowListeners;
+        final ListenerTotals listenerTotals;
         final LongAdder listenerCalls = new LongAdder(), listenerEnded = new LongAdder();
         /** The thread that started the capture (the server thread in production); only it touches the depth. */
         final Thread serverThread = Thread.currentThread();
         int serverListenerDepth;
+        /** Per nesting depth (1-based): time of the nested listener calls that ended inside the call at that depth. */
+        final long[] childNanos = new long[ListenerTotals.MAX_DEPTH + 1];
+        long nestingOverflow;
         /** Per measured tick: current tick and capture offsets (micros) of the measured interval. Server thread writes. */
         final int measuredCapacity;
         long[] measuredTicks = new long[64], measuredStarts = new long[64], measuredEnds = new long[64];
@@ -191,6 +226,10 @@ public final class SchedulerProbe {
             this.id = id; this.startedNanos = startedNanos; this.deadline = startedNanos + TimeUnit.SECONDS.toNanos(seconds);
             this.clock = clock; this.ticks = ticks;
             this.measuredCapacity = Math.max(1, seconds) * MEASURED_TICKS_PER_SECOND;
+            this.slowCapacity = slowCapacity(seconds);
+            this.slowExecutions = new SlowRecords(SLOW_NANOS, slowCapacity);
+            this.slowListeners = new SlowRecords(SLOW_NANOS, slowCapacity);
+            this.listenerTotals = new ListenerTotals(startedNanos, seconds);
         }
         /** Only the first tick-end listener call of each tick counts; ticks without a server tick identity are skipped. */
         synchronized void measuredTick(long started, double durationMillis) {
@@ -261,6 +300,7 @@ public final class SchedulerProbe {
             if (throwing) totals.throwing++;
             totals.totalNanos += elapsed;
             totals.maxNanos = Math.max(totals.maxNanos, elapsed);
+            totals.histogram[ListenerTotals.bucket(elapsed)]++;
             totals.lastOffsetMillis = (clock.getAsLong() - startedNanos) / 1_000_000;
             inFlight--;
             if (!running.remove(token)) return;         // creation bookkeeping is never a slow call
@@ -291,10 +331,15 @@ public final class SchedulerProbe {
             closed = true;
             long now = clock.getAsLong();
             List<Map<String, Object>> rows = new ArrayList<>();
-            groups.forEach((key, totals) -> rows.add(Map.of("event", key.event(), "owner", key.owner(), "taskClass", key.taskClass(),
+            groups.forEach((key, totals) -> {
+                List<Object> histogram = new ArrayList<>(totals.histogram.length);
+                for (long bucket : totals.histogram) histogram.add(bucket);
+                rows.add(Map.of("event", key.event(), "owner", key.owner(), "taskClass", key.taskClass(),
                     "sync", key.sync(), "caller", key.caller(), "counts", Map.of("started", totals.started, "completed", totals.completed,
                     "throwing", totals.throwing, "totalNanos", totals.totalNanos, "maxNanos", totals.maxNanos,
-                    "firstOffsetMillis", totals.firstOffsetMillis, "lastOffsetMillis", totals.lastOffsetMillis))));
+                    "firstOffsetMillis", totals.firstOffsetMillis, "lastOffsetMillis", totals.lastOffsetMillis),
+                    "histogramLog2", List.copyOf(histogram)));
+            });
             List<Token> unfinished = new ArrayList<>(running);
             unfinished.sort(Comparator.comparingLong(Token::startedNanos));
             List<Map<String, Object>> runningRows = new ArrayList<>();
@@ -333,6 +378,7 @@ public final class SchedulerProbe {
             result.put("slowExecutions", slowExecutions.export());
             result.put("runningAtStop", runningAtStop);
             result.put("slowListeners", listeners);
+            result.put("listenerTotals", listenerTotals.export(now, nestingOverflow));
             Map<String, Object> measured = new LinkedHashMap<>();
             List<Object> tickList = new ArrayList<>(measuredCount), startList = new ArrayList<>(measuredCount), endList = new ArrayList<>(measuredCount);
             for (int i = 0; i < measuredCount; i++) {
@@ -347,7 +393,9 @@ public final class SchedulerProbe {
             measured.put("dropped", measuredDropped);
             result.put("measuredTicks", measured);
             result.put("limits", Map.of("groups", MAX_GROUPS, "taskIds", MAX_TASK_IDS, "slowNanos", SLOW_NANOS,
-                    "slowExecutions", MAX_SLOW_EXECUTIONS, "slowListeners", MAX_SLOW_LISTENERS, "runningAtStop", MAX_RUNNING_AT_STOP));
+                    "slowExecutions", slowCapacity, "slowListeners", slowCapacity, "runningAtStop", MAX_RUNNING_AT_STOP,
+                    "listenerKeys", ListenerTotals.MAX_KEYS, "listenerOwners", ListenerTotals.MAX_OWNERS,
+                    "listenerDepth", ListenerTotals.MAX_DEPTH));
             result.put("notes", "Creation counts cover registrations during this capture; their timing fields measure probe bookkeeping, not scheduling latency. Execution times cover runnable/consumer bodies and callable calls. "
                     + "Cancellation requests are not counts of removed tasks. Deferred scans include the entire queued cancellation runnable. "
                     + "Timings are inclusive wall time, not CPU time; request and deferred costs overlap other execution scopes and must not be added. "
@@ -362,7 +410,12 @@ public final class SchedulerProbe {
                     + "which do not make the list incomplete; calls running on other threads do. "
                     + "measuredTicks: per server tick (current tick), the interval Paper measured as the tick duration: it ends where the "
                     + "tick's first ServerTickEndEvent listener call began (Paper reads the duration just before that dispatch), so "
-                    + "tick-end listeners, the stop and empty-server pauses lie outside it.");
+                    + "tick-end listeners, the stop and empty-server pauses lie outside it. "
+                    + "Groups carry histogramLog2 (completed scopes by floor(log2(nanos))). "
+                    + "listenerTotals aggregates every listener call per owner x listener class x event class x priority x async flag: "
+                    + "totalNanos is inclusive (all threads), selfNanos is server-thread time minus nested listener calls, other-thread calls "
+                    + "are also counted apart; series holds per-second server-thread total/self time per owner plugin. "
+                    + "observedInvocations = sum of calls + overflow.calls + slowListeners.runningAtStop (calls racing the stop on other threads aside).");
             return result;
         }
     }

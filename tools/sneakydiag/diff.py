@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any
 
 from .analysis import Options, analyze
-from .loader import Capture
+from .listeners import short
+from .loader import Capture, listener_totals, spawns
+from .spawns import NATURAL_REASONS
 from .providers import recover_spells
 from .sparkwire import ProfileError, read_profile
 from .spark import utc
@@ -55,7 +57,26 @@ def extract(cap: Capture) -> dict[str, Any]:
     m: dict[str, Any] = {
         "result": r, "workload": workload_of(cap), "timeline": tl,
         "sections": {}, "levels": {}, "counts": {}, "freeform": {}, "scheduler": {}, "providers": {},
+        "listeners": {}, "spawns": {}, "listenerTotals": False, "spawnCounts": False,
     }
+    lt = listener_totals(cap)
+    if lt is not None:
+        m["listenerTotals"] = True
+        for row in lt["rows"]:
+            name = (f"{short(row['listenerClass'])} on {short(row['eventClass'])} [{row['priority']}"
+                    + (" async]" if row["asyncEvent"] else "]"))
+            prev = m["listeners"].get((row["owner"], name))
+            m["listeners"][(row["owner"], name)] = {
+                "selfNanos": row["selfNanos"] + (prev["selfNanos"] if prev else 0),
+                "totalNanos": row["totalNanos"] + (prev["totalNanos"] if prev else 0),
+                "calls": row["calls"] + (prev["calls"] if prev else 0), "spanMs": observed_ms}
+    sp = spawns(cap)
+    if sp is not None:
+        m["spawnCounts"] = True
+        for row in sp["rows"]:
+            key = (row["reason"], row["entityType"] + (f" by {row['plugin']}" if row["plugin"] else ""))
+            prev = m["spawns"].get(key)
+            m["spawns"][key] = {"value": row["total"] + (prev["value"] if prev else 0), "spanMs": observed_ms}
     for p in cap.providers:
         pr = next((x for x in r["providers"] if x["plugin"] == p.plugin), {})
         m["providers"][p.plugin] = {"complete": p.complete, "reason": p.reason, "version": p.plugin_version,
@@ -134,11 +155,23 @@ def compare(before: Capture, after: Capture, *, tolerance: float = 0.10, top: in
     out["freeform"] = _rate_deltas(b["freeform"], a["freeform"], top, ("selfNanos",))
     out["levels"] = _level_deltas(b["levels"], a["levels"], top)
     out["counts"] = _count_deltas(b["counts"], a["counts"], top)
+    out["listeners"] = (_rate_deltas(b["listeners"], a["listeners"], top, ("selfNanos", "totalNanos"))
+                        if b["listenerTotals"] and a["listenerTotals"] else None)
+    out["listenersNote"] = _missing_note("listener totals", b["listenerTotals"], a["listenerTotals"])
+    out["spawns"] = (_count_deltas(b["spawns"], a["spawns"], top) if b["spawnCounts"] and a["spawnCounts"] else None)
+    out["spawnsNote"] = _missing_note("spawn counts", b["spawnCounts"], a["spawnCounts"])
     out["scheduler"] = [{"metric": k, "before": b["scheduler"].get(k), "after": a["scheduler"].get(k)}
                         for k in sorted(set(b["scheduler"]) | set(a["scheduler"]))
                         if k.startswith("pending") or abs(num(a["scheduler"].get(k)) - num(b["scheduler"].get(k))) > 0][:top + 2]
     out["comparable"] = not any(w["severity"] == "blocker" for w in out["warnings"])
     return out
+
+
+def _missing_note(what: str, before: bool, after: bool) -> str | None:
+    if before and after:
+        return None
+    side = " and ".join(n for n, has in (("before", before), ("after", after)) if not has)
+    return f"{what} not recorded in {side} (older writer or companion): not compared, not zero"
 
 
 def _id(c: Capture) -> dict[str, Any]:
@@ -170,6 +203,11 @@ def _warnings(bc: Capture, ac: Capture, b: dict[str, Any], a: dict[str, Any], to
         if m["timeline"] is None:
             w.append(_warn("warning", f"{label}: no timeline report; tick statistics cannot be compared"))
     w.extend(_workload_warnings(b["workload"], a["workload"], tol))
+    for label, m in (("before", b), ("after", a)):
+        natural = {k[0] for k, v in m["spawns"].items() if k[0] in NATURAL_REASONS and v["value"]}
+        if natural:
+            w.append(_warn("warning", f"{label}: natural-type spawns ({', '.join(sorted(natural))}) although natural "
+                                      "spawning should be disabled; entity counts may differ for that reason"))
     tb, ta = b["timeline"], a["timeline"]
     if tb and ta and tb["observedMillis"] and abs(ta["observedMillis"] - tb["observedMillis"]) > tol * tb["observedMillis"]:
         w.append(_warn("warning", f"capture lengths differ ({tb['observedMillis'] / 1000:.0f}s vs "
@@ -351,8 +389,25 @@ def render_diff(d: dict[str, Any]) -> str:
     o += ["", "Counts (per observed second)"]
     o += table(d["counts"], [("provider", "provider"), ("count", "count"), ("status", "status"),
                              ("perSecBefore", "/s before"), ("perSecAfter", "/s after")])
+    o += ["", "Listeners (Ignite listener totals; matched by owner + listener + event + priority; rates per observed second)"]
+    li = d.get("listeners")
+    if li is None:
+        o.append("  " + (d.get("listenersNote") or "unavailable"))
+    else:
+        o.append(f"  {li['matched']} matched, {li['added']} only in after, {li['removed']} only in before")
+        o += table(li["top"], [("provider", "owner"), ("name", "listener"), ("status", "status"),
+                               ("selfMsPerSecBefore", "self ms/s before"), ("selfMsPerSecAfter", "self ms/s after"),
+                               ("selfDeltaMsPerSec", "delta"), ("totalMsPerSecBefore", "incl ms/s before"),
+                               ("totalMsPerSecAfter", "incl ms/s after"), ("callsPerSecBefore", "calls/s before"),
+                               ("callsPerSecAfter", "calls/s after")])
+    o += ["", "Spawns (timeline; spawned per observed second, cancelled spawns excluded)"]
+    if d.get("spawns") is None:
+        o.append("  " + (d.get("spawnsNote") or "unavailable"))
+    else:
+        o += table(d["spawns"], [("provider", "reason"), ("count", "entity type [by plugin]"), ("status", "status"),
+                                 ("perSecBefore", "/s before"), ("perSecAfter", "/s after")])
     o += ["", "Scheduler"]
-    o += table(d["scheduler"], [("metric", "metric"), ("before", "before"), ("after", "after")])
+    o += table(d["scheduler"],[("metric", "metric"), ("before", "before"), ("after", "after")])
     o += ["", "Reading this: inclusive timings overlap and are not additive; a delta is evidence of a difference between "
               "two captures, and attributes the change only if workload and coverage match. Repeat the capture to estimate noise."]
     return "\n".join(o) + "\n"

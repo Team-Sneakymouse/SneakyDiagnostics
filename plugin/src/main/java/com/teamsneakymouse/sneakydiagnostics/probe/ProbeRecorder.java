@@ -14,7 +14,7 @@ import java.util.function.LongSupplier;
  * synchronization, and begin/finish must run on the same thread as the instrumented code.
  * <ul>
  *   <li>sections: calls, inclusive {@code totalNanos}, exclusive {@code selfNanos} (via a strictly nested stack), max with
- *   when it happened, a log2 histogram with p50/p95/p99, and a per-second series (the 16 largest sections are reported);</li>
+ *   when it happened, a log2 histogram with p50/p95/p99, and a per-second series (up to the 64 largest sections, fewer for long captures, see {@link #seriesSections});</li>
  *   <li>slowest: the 10 longest calls across all sections; counts; levels (sampled when {@link #sampleDue()});</li>
  *   <li>a per-second series for counts (windows with a non-zero count) and levels (runs of windows with the same last
  *   sample), cheapest keys first within {@value #SERIES_VALUES} values.</li>
@@ -31,7 +31,7 @@ import java.util.function.LongSupplier;
  * windows = capture seconds, which the commands cap at 1800), a 41-long histogram and the stat fields; per count and per
  * level one such array (a level also has a bitset of its sampled windows). Worst case (256 sections, counts and levels)
  * 4 x 256 x 1800 x 8 B = 14.7 MiB (29.5 MiB at the hard clamp of 3600 windows), dropped at {@link #finish} and on
- * {@link #begin}. Only the 16 largest sections and at most {@value #SERIES_VALUES} count/level series values are exported,
+ * {@link #begin}. Only the largest sections within {@value #SECTION_SERIES_VALUES} values and at most {@value #SERIES_VALUES} count/level series values are exported,
  * so the report stays well under the provider value limit (see the tests).
  */
 public final class ProbeRecorder {
@@ -40,7 +40,9 @@ public final class ProbeRecorder {
     public static final int MAX_DEPTH = 64;
     public static final int HISTOGRAM_BUCKETS = 41;
     public static final int SLOWEST = 10;
-    public static final int SERIES_SECTIONS = 16;
+    public static final int SERIES_SECTIONS = 64;
+    /** Values the section series may use in total (2 per window per section, plus 3): fewer sections for long captures. */
+    public static final int SECTION_SERIES_VALUES = 150_000;
     public static final int WINDOW_MILLIS = 1000;
     public static final int MAX_WINDOWS = 3600;
     public static final int MAX_NAME = 192;
@@ -365,7 +367,7 @@ public final class ProbeRecorder {
         Map<String, Object> series = new LinkedHashMap<>();
         series.put("windowMillis", (long) WINDOW_MILLIS);
         Map<String, Object> seriesSections = new LinkedHashMap<>();
-        for (Section s : ordered.subList(0, Math.min(SERIES_SECTIONS, ordered.size()))) {
+        for (Section s : ordered.subList(0, Math.min(seriesSections(shown), ordered.size()))) {
             List<Object> calls = new ArrayList<>(shown), nanos = new ArrayList<>(shown);
             for (int i = 0; i < shown; i++) {
                 calls.add(s.windowCalls[i]);
@@ -398,6 +400,11 @@ public final class ProbeRecorder {
      * inclusive, {@code values}); a window in no run had no sample. Keys are taken cheapest first (rare markers before
      * busy counters) while their values fit in {@link #SERIES_VALUES}; the rest are named in {@code omitted}.
      */
+    /** How many sections get a series: {@value #SERIES_SECTIONS}, fewer when that would exceed {@value #SECTION_SERIES_VALUES} values. */
+    public static int seriesSections(int windows) {
+        return Math.max(1, Math.min(SERIES_SECTIONS, SECTION_SERIES_VALUES / (2 * Math.max(1, windows) + 3)));
+    }
+
     private void keySeries(Map<String, Object> series, int shown) {
         record Candidate(String key, boolean level, List<Object> a, List<Object> b, List<Object> c, int cost) {}
         List<Candidate> all = new ArrayList<>(counts.size() + levels.size());

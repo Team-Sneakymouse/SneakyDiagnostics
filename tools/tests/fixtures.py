@@ -62,6 +62,57 @@ def slow_ignite() -> dict[str, Any]:
              "startOffsetMicros": 4_900_000, "runningNanosAtStop": 200_000_000}]}}
 
 
+def with_listener_totals(doc: dict[str, Any]) -> None:
+    """A scheduler edit: Ignite listener totals (2026-11) and execution-group histograms. Delta's open listener spikes
+    in window 2 (the slow window); its calls plus Gamma's and Alpha's add up to slowListeners.observedInvocations (5000)."""
+    def row(owner: str, listener: str, event: str, calls: int, self_ms: float, total_ms: float, max_ms: float,
+            bucket: int) -> dict[str, Any]:
+        hist = [0] * 41
+        hist[bucket] = calls
+        return {"owner": owner, "listenerClass": listener, "eventClass": event, "priority": "NORMAL", "asyncEvent": False,
+                "calls": calls, "totalNanos": int(total_ms * 1e6), "selfNanos": int(self_ms * 1e6),
+                "maxNanos": int(max_ms * 1e6), "otherThreadCalls": 0, "otherThreadNanos": 0, "histogramLog2": hist}
+    ms_ = lambda xs: [int(x * 1e6) for x in xs]  # noqa: E731
+    doc["ignite"]["listenerTotals"] = {
+        "keys": 3, "maxKeys": 4096, "overflow": {"calls": 0, "totalNanos": 0}, "nestingOverflow": 0, "maxDepth": 64,
+        "complete": True, "rows": [
+            row("Delta", "com.delta.OpenListener", "org.bukkit.event.inventory.InventoryOpenEvent", 500, 45.0, 60.0, 40.0, 16),
+            row("Gamma", "com.gamma.DamageListener", "org.bukkit.event.entity.EntityDamageEvent", 4400, 30.0, 35.0, 1.0, 12),
+            row("Alpha", "com.alpha.TickListener", "com.destroystokyo.paper.event.server.ServerTickEndEvent", 100, 5.0, 5.0,
+                0.2, 15)],
+        "series": {"windowMillis": 1000, "maxOwners": 256, "omittedOwners": 0, "owners": {
+            "Delta": {"totalNanos": ms_([2, 2, 52, 2, 2]), "selfNanos": ms_([1, 1, 40, 2, 1])},
+            "Gamma": {"totalNanos": ms_([7, 7, 7, 7, 7]), "selfNanos": ms_([6, 6, 6, 6, 6])},
+            "Alpha": {"totalNanos": ms_([1, 1, 1, 1, 1]), "selfNanos": ms_([1, 1, 1, 1, 1])}}}}
+    for group in doc["ignite"]["groups"]:
+        hist = [0] * 41
+        hist[20] = group["counts"]["completed"]       # about 1..2 ms each
+        group["histogramLog2"] = hist
+
+
+def with_spawns(natural: bool = False):
+    """A timeline edit: spawn counts (2026-11). ``natural`` adds NATURAL zombies (one cancelled) and a CHUNK_GEN cow."""
+    def edit(doc: dict[str, Any]) -> None:
+        rows = [{"reason": "CUSTOM", "entityType": "ZOMBIE", "plugin": "Shrine", "total": 30, "cancelled": 0,
+                 "windows": [0, 2, 4], "n": [5, 20, 5]},
+                {"reason": "CUSTOM", "entityType": "ITEM_DISPLAY", "plugin": "Alpha", "total": 12, "cancelled": 2,
+                 "windows": [1, 2], "n": [6, 6]},
+                {"reason": "BREEDING", "entityType": "COW", "total": 1, "cancelled": 0, "windows": [3], "n": [1]}]
+        if natural:
+            rows += [{"reason": "NATURAL", "entityType": "ZOMBIE", "total": 4, "cancelled": 1, "windows": [2, 3], "n": [3, 1]},
+                     {"reason": "CHUNK_GEN", "entityType": "COW", "total": 2, "cancelled": 0, "windows": [4], "n": [2]}]
+        doc["spawns"] = {"windowMillis": 1000, "observed": sum(r["total"] + r["cancelled"] for r in rows),
+                         "keys": len(rows), "maxKeys": 512, "overflow": 0, "droppedOffThread": 0,
+                         "attributedReasons": ["CUSTOM", "DEFAULT"], "complete": True, "rows": rows}
+        doc["spawnCollectionNanos"] = 400_000
+    return edit
+
+
+def census_budget(doc: dict[str, Any]) -> None:
+    """An entities edit: the wall-clock census budget fields (2026-11)."""
+    doc.update({"budgetMillisPerSecond": 50, "budgetExhaustedTicks": 3, "visitOrder": "players-first"})
+
+
 def scheduler(schema: int, slow: bool = False, gamma: bool = False) -> dict[str, Any]:
     """``gamma`` adds a second task owner (Gamma) without a provider; ``slow`` adds Ignite slow-call records."""
     def snap(t: int, pending: int, new: int, missing: int, spells: int) -> dict[str, Any]:
@@ -221,7 +272,7 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
                failed_providers: tuple[str, ...] = (), gz_providers: tuple[str, ...] = (),
                planned_index_names: bool = False, slow: bool = False, gamma: bool = False,
                enabled: tuple[str, ...] = ("Alpha",), timeline_edit: Any = None, scheduler_edit: Any = None,
-               plugins_collector: bool = True) -> Path:
+               plugins_collector: bool = True, entities_edit: Any = None) -> Path:
     """A v2 folder: manifest, index, per-provider files, optionally gzipped reports.
 
     ``gz_providers`` stores those providers' files compressed. The index names each file as stored, unless
@@ -252,7 +303,10 @@ def v2_capture(root: Path, name: str = "v2", *, players: int = 30, entity_total:
     if scheduler_edit:
         scheduler_edit(sc)
     add("scheduler-1.json", "scheduler", sc, "scheduler" in gz)
-    add("entities-1.json", "entities", {**entities(2), **cid}, "entities" in gz)
+    en = {**entities(2), **cid}
+    if entities_edit:
+        entities_edit(en)
+    add("entities-1.json", "entities", en, "entities" in gz)
     index_entries = []
     # plugins_collector=False: a capture without the plugins collector (e.g. scheduler only): no index, no provider files
     all_probes = {**probes, **(extra_providers or {})} if plugins_collector else {}

@@ -35,6 +35,7 @@ the file is skipped, a warning is printed, and everything that depended on it is
 Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
 
 - **Inventory**: files with verification status, collectors with completion reason and coverage flags (truncation, overflow, dropped, unfinished),
+  the census budget and chunk visit order (`detail`; censuses without these fields used 2 ms per tick in world order),
   collectors that were not captured, the provider selection, and each incomplete provider with the cause taken from its own fields.
 - **Timeline**: tick count, observed ticks/s, tick-weighted mean/max, share of ticks over 50/100 ms, empty seconds. Empty seconds are gaps, not free ticks.
 - **Providers**: for `sneakydiagnostics.probe/1` providers the top sections by `selfNanos` (exclusive, additive) and by `totalNanos`
@@ -43,12 +44,21 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
   lower-cased spell name, but only when the detail is complete and sums exactly to the global self total; otherwise the tool says why it refuses.
   Other free-form providers (Voice) list their scalar fields and every `{totalNanos, samples}` timer found, with queue/delay timers labelled as waiting time.
 - **Scheduler**: pending-task range and per-plugin pending, snapshot churn, truncation/overflow, snapshot collection overhead, and Ignite groups by owner x event x
-  thread kind (inclusive wall time).
+  thread kind (inclusive wall time), with a p99 upper bound per execution group from its histogram (companions from 2026-11).
+- **Listeners**: Ignite listener totals (companions from 2026-11): every listener call by owner plugin and by listener x event x
+  priority, ranked by server-thread self time (nested listener calls subtracted, so self times add up), with calls, inclusive time, mean,
+  p99 (log2 bucket upper bound), max and other-thread calls; time in `ServerTickEndEvent` listeners (outside tick durations) is shown
+  apart, and observed calls are checked against totals + overflow + running at stop. An older companion is reported as "not recorded".
 - **Entity census**: segment-combined counts by type and owner hint, tracked-subscription groups, per-world coverage (unreached worlds are unknown, not zero).
+- **Spawns**: entity spawns from the timeline (2026-11) by reason, by spawning plugin (CUSTOM/DEFAULT, a hint) and by reason x type.
+  Natural spawning is disabled on this server, so any natural-type reason (NATURAL, CHUNK_GEN, JOCKEY, MOUNT, PATROL, RAID,
+  REINFORCEMENTS, TRAP, VILLAGE_DEFENSE, VILLAGE_INVASION, SPAWNER, TRIAL_SPAWNER), even cancelled, is printed in a loud block and as a lead.
 - **Window correlation**: the worst timeline windows (max tick at or above `--slow-ms`, default 100; `--top-windows`, default 10), and for each the provider
   sections active in that window (from `series`, with a multiple of that section's median window), the scheduler snapshots that fell in it with the largest
   pending changes and the snapshot's own cost. For probes with count/level series it also shows what the provider counted in that second
   and its sampled levels against their median (a level with no sample in that second is left out, not shown as zero).
+  With Ignite listener totals it shows each owner plugin's listener self and inclusive time in that second against its median second,
+  and the slow-vs-other comparison includes owners' listener self time.
   It also lists sections that are busier in slow windows than in other windows. A provider
   with no series gets an explicit "cannot be attributed" statement. MagicSpells' operation series (execution-4) is shown per
   window as outermost-scope time and self time by operation. **Slow calls** place individual timed calls in the window: Ignite's
@@ -68,8 +78,9 @@ Human-readable summary on stdout, the same data as JSON with `--json`. Sections:
   Ignite groups remain aggregates; a companion without slow-call records is reported as such.
 - **Coverage audit**: enabled plugins (manifest) against registered providers, what each provider measures and its limits
   (omitted keys, series left out, evicted slow records, unobserved counters), and the plugins without a provider ranked by
-  Ignite-measured scheduler time and slow listener calls. No provider means unmeasured, not zero cost; Ignite columns are
-  inclusive, overlap provider sections and cover only scheduler tasks and slow listener calls. Absence of a provider is
+  Ignite-measured scheduler time plus listener self time (from listener totals; with an older companion, slow listener calls
+  only). No provider means unmeasured, not zero cost; Ignite columns overlap provider sections and cover only scheduler tasks
+  and event listeners. Absence of a provider is
   established only by a captured plugins index: without it (a scheduler-only capture) every plugin's provider status is
   unknown, none is reported missing, and Ignite-measured owners are listed under unknown status instead. Slow-call lists
   name why they are incomplete: evicted shorter calls, or listener calls still running on other threads at stop (counted,
@@ -101,7 +112,9 @@ official runtime on real profiles. If spark renumbers fields, update the `F_*` c
 
 For the controlled-change workflow: capture, change one thing, capture again under comparable load, then compare.
 Tick statistics, probe sections matched by provider + section name (per-observed-second rates, with added/removed flagged), MagicSpells spells and operations,
-Ignite groups, levels, counts and scheduler pending. The top of the output is a loud block when:
+Ignite groups, Ignite listener totals (self and inclusive ms per second by owner + listener + event + priority), spawns per second by reason x type
+(x plugin), levels, counts and scheduler pending. A side without listener totals or spawn counts is reported as "not compared, not zero", and
+natural-type spawns in either capture add a warning. The top of the output is a loud block when:
 
 - players, entities or chunks differ by more than `--tolerance` (default 10%), or workload is unknown for either capture (manifest first, else the last spark window, labelled approximate),
 - a capture, collector or provider is incomplete or its file is missing/mismatched,

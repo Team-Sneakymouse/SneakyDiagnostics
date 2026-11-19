@@ -52,7 +52,9 @@ def render(r: dict[str, Any]) -> str:
     for p in r["providers"]:
         o.extend(_provider(p))
     o.extend(_scheduler(r["scheduler"]))
+    o.extend(_listeners(r.get("listeners")))
     o.extend(_entities(r["entities"]))
+    o.extend(_spawns(r.get("spawns")))
     o.extend(_spark(r["spark"]))
     o.extend(_correlation(r["correlation"]))
     o.extend(_coverage(r.get("coverage")))
@@ -81,7 +83,7 @@ def _inventory(inv: dict[str, Any]) -> list[str]:
     o.append("  collectors:")
     o += table(inv["collectors"], [("collector", "collector"), ("segment", "seg"), ("reason", "reason"),
                                    ("complete", "complete"), ("finishedAfterMillis", "after ms"),
-                                   ("coverageFlags", "coverage flags")], "    ")
+                                   ("coverageFlags", "coverage flags"), ("detail", "detail")], "    ")
     if inv["collectorsNotCaptured"]:
         o.append("  not captured: " + ", ".join(inv["collectorsNotCaptured"]) + " (absent, not zero)")
     if inv["selectedProviders"] is not None:
@@ -384,6 +386,12 @@ def _correlation(c: dict[str, Any]) -> list[str]:
                 o.append(f"    {msw['plugin']}: outermost scopes {msw['outermostScopesMs']} ms "
                          f"({msw['pctOfWindowTickTime']}% of tick time); self by operation: "
                          + (", ".join(f"{x['operation']} {x['selfMs']} ms" for x in msw["operationsBySelf"]) or "none"))
+        lw = w.get("listeners")
+        if lw is not None:
+            o.append(f"    Ignite listeners this second: {lw['selfMs']} ms self over all owners (server thread)")
+            o += table(lw["owners"], [("owner", "owner"), ("selfMs", "self ms"), ("totalMsInclusive", "incl. ms"),
+                                      ("pctOfWindowTickTime", "% of tick time"), ("medianWindowSelfMs", "median win self ms"),
+                                      ("xMedian", "x median")], "      ")
         sl = w.get("slowCalls")
         if sl is not None:
             o.append(f"    slow calls placed in this window: {sl['count']}"
@@ -438,6 +446,15 @@ def _leads(r: dict[str, Any]) -> list[str]:
         t = s["pendingByPlugin"][0]
         o.append(f"  - Scheduler: {t['plugin']} has the most sync-pending tasks (max {t['syncMax']:,.0f}); a large "
                  "queue alone does not show per-tick cost or a leak.")
+    li = r.get("listeners") or {}
+    if li.get("available") and li["byOwner"]:
+        t = li["byOwner"][0]
+        o.append(f"  - Listeners: {t['owner']} has the most listener self time ({t['selfMs']} ms over {t['calls']:,} calls); "
+                 "see the Listeners section for which listener and event.")
+    sp = r.get("spawns") or {}
+    if sp.get("naturalFinding"):
+        o.append("  - Spawns: natural-type spawning is active although it should be disabled (see Spawns); check world "
+                 "and spawner settings.")
     e = r["entities"]
     if e and e["ownerHintsByCount"]:
         k, v = next(iter(e["ownerHintsByCount"].items()))
@@ -463,11 +480,13 @@ def _coverage(c: dict[str, Any] | None) -> list[str]:
     if c["missingProvidersByMeasuredTime"]:
         o.append("  NO PROVIDER, but Ignite measured time (priority for new providers; inclusive, overlapping):")
         o += table(c["missingProvidersByMeasuredTime"], [("plugin", "plugin"), ("igniteSyncTaskMs", "sync task ms"),
-                                                         ("igniteSyncTaskRuns", "runs"), ("slowListenerCalls", "slow listener calls"),
+                                                         ("igniteSyncTaskRuns", "runs"), ("listenerSelfMs", "listener self ms"),
+                                                         ("slowListenerCalls", "slow listener calls"),
                                                          ("slowListenerMs", "slow listener ms")], "    ")
     o.append("  all plugins:")
     o += table(c["rows"], [("plugin", "plugin"), ("provider", "provider"), ("instrumentation", "instrumentation"),
                            ("measured", "measures"), ("igniteSyncTaskMs", "sync task ms"),
+                           ("listenerSelfMs", "listener self ms"), ("listenerCalls", "listener calls"),
                            ("slowListenerCalls", "slow listeners"), ("slowTaskCalls", "slow tasks")], "    ")
     limited = [r for r in c["rows"] if r["limits"]]
     if limited:
@@ -475,4 +494,58 @@ def _coverage(c: dict[str, Any] | None) -> list[str]:
         for r in limited:
             o.append(f"    - {r['plugin']}: " + "; ".join(r["limits"]))
     o.append("  " + c["note"])
+    return o
+
+
+def _listeners(li: dict[str, Any] | None) -> list[str]:
+    o = _head("Listeners (Ignite listener totals, ranked by server-thread self time)")
+    if not li or not li.get("available"):
+        return o + ["  " + (li or {}).get("reason", "no listener totals")]
+    o.append(f"  {li['keys']:,} listener keys; {li['selfMs']:,.1f} ms self in total over "
+             f"{li['observedMillis'] / 1000:.1f}s; complete={li['complete']}"
+             + (f"; ServerTickEndEvent listeners {li['tickEndSelfMs']} ms self (after the tick was measured)"
+                if li["tickEndSelfMs"] else ""))
+    for why in li["why"]:
+        o.append("  GAP " + why)
+    acc = li.get("accounting")
+    if acc:
+        o.append(f"  calls: {acc['observedInvocations']:,.0f} observed = {acc['countedCalls']:,.0f} in totals + "
+                 f"{acc['runningAtStop']:,.0f} running at stop" + ("" if not acc["difference"] else
+                                                                  f"  MISMATCH: {acc['note']}"))
+    o.append("  by owner plugin:")
+    o += table(li["byOwner"], [("owner", "owner"), ("keys", "keys"), ("calls", "calls"), ("selfMs", "self ms"),
+                               ("selfPctOfObserved", "self % of wall"), ("totalMsInclusive", "total ms (incl.)")], "    ")
+    o.append("  by listener x event (top by self):")
+    o += table(li["bySelf"], [("owner", "owner"), ("listener", "listener"), ("event", "event"), ("priority", "priority"),
+                              ("calls", "calls"), ("selfMs", "self ms"), ("totalMsInclusive", "total ms (incl.)"),
+                              ("meanUs", "mean us"), ("p99MsUpperBound", "p99 ms<="), ("maxMs", "max ms"),
+                              ("otherThreadCalls", "other-thread calls")], "    ")
+    o.append("  " + li["note"])
+    return o
+
+
+def _spawns(s: dict[str, Any] | None) -> list[str]:
+    o = _head("Spawns (timeline)")
+    if not s or not s.get("available"):
+        return o + ["  " + (s or {}).get("reason", "no spawn counts")]
+    if s["naturalFinding"]:
+        o += ["  " + "!" * 76, "  !!! " + s["naturalFinding"], "  " + "!" * 76]
+        o += table(s["natural"], [("reason", "reason"), ("entityType", "entity type"), ("spawned", "spawned"),
+                                  ("cancelled", "cancelled"), ("firstWindow", "first s"), ("lastWindow", "last s")], "    ")
+    else:
+        o.append("  no natural-type spawns (NATURAL, CHUNK_GEN, spawners, raids, ...) were observed")
+    o.append(f"  {s['spawned']:,.0f} spawned, {s['cancelled']:,.0f} cancelled ({s['observed']:,.0f} spawn events); "
+             f"complete={s['complete']}")
+    for why in s["why"]:
+        o.append("  GAP " + why)
+    o.append("  by reason:")
+    o += table(s["byReason"], [("reason", "reason"), ("spawned", "spawned"), ("cancelled", "cancelled"),
+                               ("natural", "natural-type")], "    ")
+    if s["byPlugin"]:
+        o.append("  CUSTOM/DEFAULT spawns by spawning plugin (first plugin frame; a hint):")
+        o += table(s["byPlugin"], [("plugin", "plugin"), ("spawned", "spawned"), ("cancelled", "cancelled")], "    ")
+    o.append("  top reason x type:")
+    o += table(s["top"], [("reason", "reason"), ("entityType", "entity type"), ("plugin", "plugin"), ("total", "spawned"),
+                          ("cancelled", "cancelled"), ("windowsWithSpawns", "seconds with spawns")], "    ")
+    o.append("  " + s["note"])
     return o

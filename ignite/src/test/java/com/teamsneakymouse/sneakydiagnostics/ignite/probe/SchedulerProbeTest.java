@@ -109,13 +109,13 @@ class SchedulerProbeTest {
         var clock = new AtomicLong();
         var session = new SchedulerProbe.Session("cap", 0, 120, clock::get, () -> 1);
         int extra = 7;
-        for (int i = 0; i < SchedulerProbe.MAX_SLOW_EXECUTIONS + extra; i++) {
+        for (int i = 0; i < SchedulerProbe.slowCapacity(120) + extra; i++) {
             var token = session.execution(identity("t"));
             clock.addAndGet(SchedulerProbe.SLOW_NANOS + i);               // later calls are longer
             session.finish(token, false);
         }
         var slow = slow(session.close(), "slowExecutions");
-        assertEquals((long) SchedulerProbe.MAX_SLOW_EXECUTIONS + extra, slow.get("observed"));
+        assertEquals((long) SchedulerProbe.slowCapacity(120) + extra, slow.get("observed"));
         assertEquals((long) extra, slow.get("evicted"));
         assertEquals(false, slow.get("complete"));
         long shortestKept = records(slow).stream().mapToLong(row -> (long) row.get("nanos")).min().orElseThrow();
@@ -283,8 +283,165 @@ class SchedulerProbeTest {
         assertEquals(50_200L - 8_500L, ((List<?>) measured.get("startOffsetMicros")).get(1));
     }
 
+    @Test void slowListCapacityScalesWithCaptureLength() {
+        assertEquals(512, SchedulerProbe.slowCapacity(1));
+        assertEquals(512, SchedulerProbe.slowCapacity(8));
+        assertEquals(64 * 60, SchedulerProbe.slowCapacity(60));
+        assertEquals(16_384, SchedulerProbe.slowCapacity(1800));
+        var clock = new AtomicLong();
+        var report = new SchedulerProbe.Session("capacity", 0, 120, clock::get, () -> 1).close();
+        assertEquals(64 * 120, slow(report, "slowExecutions").get("capacity"));
+        assertEquals(64 * 120, slow(report, "slowListeners").get("capacity"));
+    }
+
+    @Test void executionGroupsCarryALog2Histogram() {
+        var clock = new AtomicLong();
+        var session = new SchedulerProbe.Session("histogram", 0, 120, clock::get, () -> 1);
+        for (long nanos : new long[]{1_000, 1_500, 3_000_000}) {
+            var token = session.execution(identity("Hist"));
+            clock.addAndGet(nanos);
+            session.finish(token, false);
+        }
+        var row = rows(session.close()).getFirst();
+        var histogram = (List<?>) row.get("histogramLog2");
+        assertEquals(ListenerTotals.BUCKETS, histogram.size());
+        assertEquals(1L, histogram.get(9), "1,000 ns: floor(log2) = 9");
+        assertEquals(1L, histogram.get(10), "1,500 ns: floor(log2) = 10");
+        assertEquals(1L, histogram.get(21), "3 ms: floor(log2) = 21");
+    }
+
+    /** Totals: every call, self time minus nested listener calls, per-owner series, other-thread calls kept apart. */
+    @Test void listenerTotalsAggregateEveryCallWithSelfTimeAndOwnerSeries() throws Exception {
+        var clock = new AtomicLong(1_000_000_000L);
+        id = "totals";
+        SchedulerProbe.start(new SchedulerProbe.Session(id, clock.get(), 60, clock::get, () -> 5));
+        var totals = SchedulerProbe.listenerTotals();
+        var outer = totals.slot("Knives", "com.knives.DamageListener", DamageEvent.class, "NORMAL", false);
+        var inner = totals.slot("Items", "com.items.OpenListener", OpenEvent.class, "LOWEST", false);
+        assertSame(outer, totals.slot("Knives", "com.knives.DamageListener", DamageEvent.class, "NORMAL", false));
+        long a = SchedulerProbe.listenerStart();            // outer: 10 ms, with a 4 ms nested call inside
+        clock.addAndGet(3_000_000L);
+        long b = SchedulerProbe.listenerStart();
+        clock.addAndGet(4_000_000L);
+        long innerElapsed = SchedulerProbe.listenerEnd(b, inner);
+        assertEquals(4_000_000L, innerElapsed, "slow: returned for a record");
+        SchedulerProbe.slowListener(b, innerElapsed, "Items", "com.items.OpenListener", OpenEvent.class.getName(), "LOWEST", false, false);
+        clock.addAndGet(3_000_000L);
+        long outerElapsed = SchedulerProbe.listenerEnd(a, outer);
+        SchedulerProbe.slowListener(a, outerElapsed, "Knives", "com.knives.DamageListener", DamageEvent.class.getName(), "NORMAL", false, false);
+        clock.addAndGet(1_500_000_000L);                    // the next call ends in window 1
+        long c = SchedulerProbe.listenerStart();
+        clock.addAndGet(100_000L);
+        SchedulerProbe.listenerEnd(c, outer);
+        Thread async = new Thread(() -> {
+            long d = SchedulerProbe.listenerStart();
+            clock.addAndGet(2_000L);
+            SchedulerProbe.listenerEnd(d, outer);
+        });
+        async.start();
+        async.join();
+        var report = SchedulerProbe.stop(id);
+        id = null;
+        var listenerTotals = slow(report, "listenerTotals");
+        var rows = records(listenerTotals, "rows");
+        assertEquals(2L, listenerTotals.get("keys"));
+        assertEquals(true, listenerTotals.get("complete"));
+        var knives = rows.getFirst();                      // ordered by self time
+        assertEquals("Knives", knives.get("owner"));
+        assertEquals(3L, knives.get("calls"));
+        assertEquals(10_000_000L + 100_000L + 2_000L, knives.get("totalNanos"));
+        assertEquals(6_000_000L + 100_000L, knives.get("selfNanos"), "server-thread self time excludes the nested call");
+        assertEquals(10_000_000L, knives.get("maxNanos"));
+        assertEquals(1L, knives.get("otherThreadCalls"));
+        assertEquals(2_000L, knives.get("otherThreadNanos"));
+        var histogram = (List<?>) knives.get("histogramLog2");
+        assertEquals(1L, histogram.get(ListenerTotals.bucket(10_000_000L)));
+        assertEquals(1L, histogram.get(ListenerTotals.bucket(2_000L)));
+        var items = rows.get(1);
+        assertEquals(4_000_000L, items.get("selfNanos"));
+        assertEquals(OpenEvent.class.getName(), items.get("eventClass"));
+        var series = slow(slow(listenerTotals, "series"), "owners");
+        var knivesSeries = slow(series, "Knives");
+        assertEquals(List.of(10_000_000L, 100_000L), knivesSeries.get("totalNanos"), "server-thread calls only, by end window");
+        assertEquals(List.of(6_000_000L, 100_000L), knivesSeries.get("selfNanos"));
+        assertEquals(4L, slow(report, "slowListeners").get("observedInvocations"));
+        long sumCalls = rows.stream().mapToLong(row -> (long) row.get("calls")).sum();
+        assertEquals(4L, sumCalls + (long) slow(listenerTotals, "overflow").get("calls"));
+        assertNull(totals.slot("Late", "L", OpenEvent.class, "NORMAL", false), "no new keys after export");
+    }
+
+    @Test void listenerKeyCapCountsOverflowAndKeepsTheInvariant() {
+        var clock = new AtomicLong(1_000_000_000L);
+        id = "totals-cap";
+        SchedulerProbe.start(new SchedulerProbe.Session(id, clock.get(), 60, clock::get, () -> 5));
+        var totals = SchedulerProbe.listenerTotals();
+        int extra = 3;
+        for (int i = 0; i < ListenerTotals.MAX_KEYS + extra; i++) {
+            var slot = totals.slot("P", "L" + i, OpenEvent.class, "NORMAL", false);
+            long started = SchedulerProbe.listenerStart();
+            clock.addAndGet(1_000L);
+            SchedulerProbe.listenerEnd(started, slot);
+        }
+        var report = SchedulerProbe.stop(id);
+        id = null;
+        var listenerTotals = slow(report, "listenerTotals");
+        assertEquals((long) ListenerTotals.MAX_KEYS, listenerTotals.get("keys"));
+        assertEquals((long) extra, slow(listenerTotals, "overflow").get("calls"));
+        assertEquals(extra * 1_000L, slow(listenerTotals, "overflow").get("totalNanos"));
+        assertEquals(false, listenerTotals.get("complete"));
+        long sumCalls = records(listenerTotals, "rows").stream().mapToLong(row -> (long) row.get("calls")).sum();
+        assertEquals(slow(report, "slowListeners").get("observedInvocations"), sumCalls + extra);
+    }
+
+    @Test void slotCacheIsPerEventClassAndAsyncFlagAndExpiresWithTheCapture() {
+        var clock = new AtomicLong();
+        var first = new SchedulerProbe.Session("cache-1", 0, 60, clock::get, () -> 1).listenerTotals;
+        var damage = first.slot("P", "L", DamageEvent.class, "NORMAL", false);
+        var open = first.slot("P", "L", OpenEvent.class, "NORMAL", false);
+        var asyncOpen = first.slot("P", "L", OpenEvent.class, "NORMAL", true);
+        ListenerTotals.Node cache = ListenerTotals.push(null, damage, DamageEvent.class, false);
+        cache = ListenerTotals.push(cache, open, OpenEvent.class, false);
+        cache = ListenerTotals.push(cache, asyncOpen, OpenEvent.class, true);
+        assertSame(damage, ListenerTotals.find(cache, first, DamageEvent.class, false));
+        assertSame(open, ListenerTotals.find(cache, first, OpenEvent.class, false));
+        assertSame(asyncOpen, ListenerTotals.find(cache, first, OpenEvent.class, true));
+        assertNull(ListenerTotals.find(cache, first, DamageEvent.class, true));
+        var second = new SchedulerProbe.Session("cache-2", 0, 60, clock::get, () -> 1).listenerTotals;
+        assertNull(ListenerTotals.find(cache, second, DamageEvent.class, false), "a new capture never reuses old slots");
+        var fresh = second.slot("P", "L", DamageEvent.class, "NORMAL", false);
+        var replaced = ListenerTotals.push(cache, fresh, DamageEvent.class, false);
+        assertNull(ListenerTotals.find(replaced, second, OpenEvent.class, false), "the old capture's chain is dropped");
+        ListenerTotals.Node chain = null;
+        for (int i = 0; i < ListenerTotals.MAX_CHAIN + 1; i++) chain = ListenerTotals.push(chain, fresh, i % 2 == 0 ? OpenEvent.class : DamageEvent.class, i % 4 < 2);
+        assertEquals(1, chain.length, "a full chain starts over");
+    }
+
+    @Test void deepNestingIsCountedAndDoesNotCorruptOuterSelfTime() {
+        var clock = new AtomicLong(1_000_000_000L);
+        id = "deep";
+        SchedulerProbe.start(new SchedulerProbe.Session(id, clock.get(), 60, clock::get, () -> 5));
+        var totals = SchedulerProbe.listenerTotals();
+        var slot = totals.slot("P", "L", OpenEvent.class, "NORMAL", false);
+        int depth = ListenerTotals.MAX_DEPTH + 2;
+        long[] starts = new long[depth];
+        for (int i = 0; i < depth; i++) { starts[i] = SchedulerProbe.listenerStart(); clock.addAndGet(1_000L); }
+        for (int i = depth - 1; i >= 0; i--) SchedulerProbe.listenerEnd(starts[i], slot);
+        var report = SchedulerProbe.stop(id);
+        id = null;
+        var listenerTotals = slow(report, "listenerTotals");
+        assertEquals(2L, listenerTotals.get("nestingOverflow"));
+        assertEquals(false, listenerTotals.get("complete"));
+        var row = records(listenerTotals, "rows").getFirst();
+        assertEquals((long) depth, row.get("calls"));
+        assertTrue((long) row.get("selfNanos") >= depth * 1_000L, "self never drops below the time actually spent");
+    }
+
+    public static final class DamageEvent {}
+    public static final class OpenEvent {}
+
     private static SchedulerProbe.Identity identity(String taskClass) { return new SchedulerProbe.Identity("Owner", taskClass, true); }
     @SuppressWarnings("unchecked") private static Map<String, Object> slow(Map<String, Object> report, String name) { return (Map<String, Object>) report.get(name); }
     @SuppressWarnings("unchecked") private static List<Map<String, Object>> records(Map<String, Object> section) { return (List<Map<String, Object>>) section.get("records"); }
+    @SuppressWarnings("unchecked") private static List<Map<String, Object>> records(Map<String, Object> section, String name) { return (List<Map<String, Object>>) section.get(name); }
     @SuppressWarnings("unchecked") private List<Map<String, Object>> rows(Map<String, Object> report) { return (List<Map<String, Object>>) report.get("groups"); }
 }

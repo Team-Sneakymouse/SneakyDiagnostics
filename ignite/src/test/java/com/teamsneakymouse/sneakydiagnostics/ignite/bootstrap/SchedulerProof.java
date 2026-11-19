@@ -88,6 +88,16 @@ public final class SchedulerProof {
         check(((Number) slowListeners.get("observedInvocations")).longValue() == 3, "Listener hook did not observe all three calls");
         check(((List<?>) slowListeners.get("records")).stream().map(value -> (Map<?, ?>) value).anyMatch(row -> row.get("owner").equals("ProofPlugin")
                 && row.get("eventClass").equals(ProofEvent.class.getName()) && row.get("priority").equals("NORMAL")), "Slow listener record missing");
+        Map<?, ?> listenerTotals = (Map<?, ?>) report.get("listenerTotals");
+        List<?> totalRows = (List<?>) listenerTotals.get("rows");
+        long totalCalls = totalRows.stream().mapToLong(value -> ((Number) ((Map<?, ?>) value).get("calls")).longValue()).sum();
+        check(totalCalls == 3, "Listener totals did not count all three calls: " + totalCalls);
+        check(totalRows.stream().map(value -> (Map<?, ?>) value).anyMatch(row -> row.get("owner").equals("ProofPlugin")
+                && row.get("eventClass").equals(ProofEvent.class.getName()) && row.get("priority").equals("NORMAL")
+                && ((Number) row.get("totalNanos")).longValue() >= 3_000_000L), "Listener totals row missing");
+        check(Boolean.TRUE.equals(listenerTotals.get("complete")), "Listener totals incomplete");
+        check(groups.stream().map(value -> (Map<?, ?>) value)
+                .allMatch(row -> ((List<?>) row.get("histogramLog2")).size() == 41), "Execution group histogram missing");
         check(((Number) ((Map<?, ?>) report.get("runningAtStop")).get("count")).longValue() == 0, "Nothing should be running at stop");
         // Without a server there is no tick identity: the tick-end hook runs but records no interval.
         check(((List<?>) ((Map<?, ?>) report.get("measuredTicks")).get("tick")).isEmpty(), "Measured tick recorded without a tick identity");
@@ -116,6 +126,11 @@ public final class SchedulerProof {
         while (System.nanoTime() < end) Thread.onSpinWait();
     }
     public static final class ProofEvent extends org.bukkit.event.Event {
+        private static final org.bukkit.event.HandlerList HANDLERS = new org.bukkit.event.HandlerList();
+        @Override public org.bukkit.event.HandlerList getHandlers() { return HANDLERS; }
+        public static org.bukkit.event.HandlerList getHandlerList() { return HANDLERS; }
+    }
+    public static final class ProofOtherEvent extends org.bukkit.event.Event {
         private static final org.bukkit.event.HandlerList HANDLERS = new org.bukkit.event.HandlerList();
         @Override public org.bukkit.event.HandlerList getHandlers() { return HANDLERS; }
         public static org.bukkit.event.HandlerList getHandlerList() { return HANDLERS; }
@@ -149,8 +164,21 @@ public final class SchedulerProof {
         begin = System.nanoTime();
         for (int i = 0; i < count; i++) listener.callEvent(event);
         long listenerActive = System.nanoTime() - begin;
-        server.invoke(name, "stop", new Object[]{"listener-benchmark"}, new String[]{"java.lang.String"});
+        Map<?, ?> benchmarkReport = (Map<?, ?>) server.invoke(name, "stop", new Object[]{"listener-benchmark"}, new String[]{"java.lang.String"});
         System.out.println("INFO synthetic listener-call cost: idle=" + listenerIdle / count + " ns/op, recording=" + listenerActive / count
-                + " ns/op; warm single-thread loop of a trivial executor, not a server TPS benchmark");
+                + " ns/op (totals included); warm single-thread loop of a trivial executor, not a server TPS benchmark");
+        long counted = ((List<?>) ((Map<?, ?>) benchmarkReport.get("listenerTotals")).get("rows")).stream()
+                .mapToLong(value -> ((Number) ((Map<?, ?>) value).get("calls")).longValue()).sum();
+        check(counted == 20_000L + count, "Listener totals lost benchmark calls: " + counted);
+        // One registration receiving two event classes in turn (a parent-class listener): the slot cache keeps both.
+        var other = new ProofOtherEvent();
+        server.invoke(name, "start", new Object[]{"listener-mixed", System.nanoTime(), 60}, new String[]{"java.lang.String", "long", "int"});
+        for (int i = 0; i < 20_000; i++) listener.callEvent((i & 1) == 0 ? event : other);
+        begin = System.nanoTime();
+        for (int i = 0; i < count; i++) listener.callEvent((i & 1) == 0 ? event : other);
+        long mixed = System.nanoTime() - begin;
+        server.invoke(name, "stop", new Object[]{"listener-mixed"}, new String[]{"java.lang.String"});
+        System.out.println("INFO synthetic listener-call cost, two event classes alternating on one registration: recording="
+                + mixed / count + " ns/op");
     }
 }

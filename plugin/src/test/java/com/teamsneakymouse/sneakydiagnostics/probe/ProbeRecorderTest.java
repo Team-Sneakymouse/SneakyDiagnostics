@@ -403,17 +403,17 @@ class ProbeRecorderTest {
         assertEquals(List.of(0L, 0L, 1L), list(s.get("calls")));
     }
 
-    @Test void seriesCoversOnlyTheLargest16Sections() {
+    @Test void seriesCoversOnlyTheLargest64Sections() {
         begin(10);
-        for (int i = 0; i < 20; i++) run(String.format("sec%02d", i), (i + 1) * 10L);
+        for (int i = 0; i < 70; i++) run(String.format("sec%02d", i), (i + 1) * 10L);
         var r = probe.finish("completed");
-        assertEquals(20, list(r.get("sections")).size());
+        assertEquals(70, list(r.get("sections")).size());
         var names = map(map(r.get("series")).get("sections")).keySet();
-        assertEquals(16, names.size());
-        for (int i = 4; i < 20; i++) assertTrue(names.contains(String.format("sec%02d", i)));
-        assertFalse(names.contains("sec03"));
+        assertEquals(ProbeRecorder.SERIES_SECTIONS, names.size());
+        for (int i = 6; i < 70; i++) assertTrue(names.contains(String.format("sec%02d", i)));
+        assertFalse(names.contains("sec05"));
         // sections are listed by total, largest first
-        assertEquals("sec19", map(list(r.get("sections")).get(0)).get("name"));
+        assertEquals("sec69", map(list(r.get("sections")).get(0)).get("name"));
     }
 
     @Test void countSeriesListsOnlyWindowsWithACount() {
@@ -684,7 +684,8 @@ class ProbeRecorderTest {
         var r = probe.finish("completed");
         assertEquals(256, list(r.get("sections")).size());
         var series = map(map(r.get("series")).get("sections"));
-        assertEquals(ProbeRecorder.SERIES_SECTIONS, series.size());
+        assertEquals(ProbeRecorder.seriesSections(seconds), series.size(), "fewer series sections for the longest captures");
+        assertTrue(series.size() >= 32);
         for (Object o : series.values()) {
             assertEquals(seconds, list(map(o).get("calls")).size());
             assertEquals(seconds, list(map(o).get("nanos")).size());
@@ -693,11 +694,26 @@ class ProbeRecorderTest {
         assertFalse(list(omitted.get("counts")).isEmpty());
         assertFalse(list(omitted.get("levels")).isEmpty());
         int total = reportValues(r);
-        // 256 x (1 map + 11 scalars + 1 list + 41 buckets) + 16 x (1 + 2 x (1 + 1800)) + counts/levels/slowest/header
+        // 256 x (1 map + 11 scalars + 1 list + 41 buckets) + seriesSections(1800) x (1 + 2 x (1 + 1800)) + counts/levels/slowest/header
         // + the count/level series (at most SERIES_VALUES plus a few per key) + the omitted names
         assertTrue(total < 250_000, "values: " + total);
         assertTrue(total > 70_000, "values: " + total);
         assertTrue(probe.complete());
+    }
+
+    @Test void ordinaryCapturesGetSeriesForThe64LargestSections() {
+        int seconds = 60;
+        begin(seconds);
+        for (int w = 0; w < seconds; w++) {
+            now = BASE + w * SEC + 10 * MS;
+            for (int i = 0; i < 100; i++) run("weapon." + i, 1_000L + i);
+        }
+        now = BASE + seconds * SEC + SEC;
+        var r = probe.finish("completed");
+        var series = map(map(r.get("series")).get("sections"));
+        assertEquals(ProbeRecorder.SERIES_SECTIONS, series.size());
+        assertTrue(series.containsKey("weapon.99") && !series.containsKey("weapon.35"), "the largest by totalNanos");
+        assertTrue(reportValues(r) < 250_000);
     }
 
     @Test void worstCaseAtTheWindowClampStaysUnderTheLimit() {

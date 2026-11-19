@@ -56,3 +56,18 @@ def scan_flags(obj: Any, path: str = "", depth: int = 2) -> list[str]:
         elif isinstance(val, dict) and depth > 0:
             out.extend(scan_flags(val, here + ".", depth - 1))
     return out
+
+
+def hist_upper_ns(hist: list[float] | None, q: float) -> float | None:
+    """Upper bound (ns) of the log2 bucket holding quantile ``q``: bucket k spans [2^k, 2^(k+1)), so < 2x over."""
+    if not hist:
+        return None
+    total = sum(hist)
+    if total <= 0:
+        return None
+    rank, seen = q * total, 0.0
+    for k, n in enumerate(hist):
+        seen += n
+        if seen >= rank:
+            return float(2 ** (k + 1))
+    return float(2 ** len(hist))

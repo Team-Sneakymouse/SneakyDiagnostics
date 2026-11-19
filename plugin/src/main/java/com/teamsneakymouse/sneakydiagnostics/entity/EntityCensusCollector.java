@@ -23,7 +23,9 @@ import org.bukkit.scheduler.BukkitTask;
 /** Bounded incremental census. Pause keeps the traversal cursor; each segment writes detached samples. */
 public final class EntityCensusCollector implements DiagnosticCollector {
     static final int MAX_ENTITIES = 100_000, MAX_CHUNKS = 30_000, MAX_CAPTURE_ENTITIES = 500_000;
-    static final long SLICE_BUDGET_NANOS = 2_000_000L;
+    /** Per-slice caps per millisecond of slice target (the former 200 entities and 8 chunks per 2 ms slice). */
+    static final int ENTITIES_PER_SLICE_MILLI = 100, CHUNKS_PER_SLICE_MILLI = 4;
+    static final String VISIT_ORDER = "players-first";
     private final Plugin plugin;
     private final ReportSink reports;
     private final Environment environment;
@@ -35,6 +37,7 @@ public final class EntityCensusCollector implements DiagnosticCollector {
         int currentTick();
         double averageTickTime();
         BukkitTask repeat(Runnable task);
+        default long nanoTime() { return System.nanoTime(); }
     }
 
     public EntityCensusCollector(Plugin plugin, ReportSink reports) {
@@ -79,6 +82,31 @@ public final class EntityCensusCollector implements DiagnosticCollector {
         if (reason.equals("plugin_disable") || reason.equals("start_error")) scan = null;
     }
 
+    /**
+     * The world's loaded chunks, nearest to a human in that world first (horizontal distance in chunks to the nearest
+     * one), so a census that runs out of time still covers where the players are. Chunks without a human in the world
+     * keep their order. Part of the non-preemptible snapshot step, counted in slice time.
+     */
+    static Chunk[] nearestPlayersFirst(Chunk[] chunks, String world, List<EntitySample.Human> humans) {
+        int[] xs = humans.stream().filter(h -> h.world().equals(world)).mapToInt(h -> (int) Math.floor(h.x()) >> 4).toArray();
+        int[] zs = humans.stream().filter(h -> h.world().equals(world)).mapToInt(h -> (int) Math.floor(h.z()) >> 4).toArray();
+        if (xs.length == 0 || chunks.length < 2 || chunks.length >= 1 << 21) return chunks;
+        long[] order = new long[chunks.length];
+        for (int i = 0; i < chunks.length; i++) {
+            long nearest = Long.MAX_VALUE;
+            int cx = chunks[i].getX(), cz = chunks[i].getZ();
+            for (int h = 0; h < xs.length; h++) {
+                long dx = cx - (long) xs[h], dz = cz - (long) zs[h];
+                nearest = Math.min(nearest, dx * dx + dz * dz);
+            }
+            order[i] = (Math.min(nearest, (1L << 42) - 1) << 21) | i;      // distance, then the original index
+        }
+        java.util.Arrays.sort(order);
+        Chunk[] sorted = new Chunk[chunks.length];
+        for (int i = 0; i < order.length; i++) sorted[i] = chunks[(int) (order[i] & ((1L << 21) - 1))];
+        return sorted;
+    }
+
     private static final class Coverage {
         final String world;
         int snapshotChunks = -1, visitedChunks, completedChunks, skippedChunks;
@@ -109,6 +137,8 @@ public final class EntityCensusCollector implements DiagnosticCollector {
         int visitedChunks, skippedChunks, invalidEntities, errors, duplicateEntities, attemptedEntities;
         long totalSliceNanos, maxSliceNanos, segmentStartedNanos;
         int slices, seconds, startTick;
+        int budgetExhaustedTicks;
+        SliceBudget budget;
         String startedAt;
         double startMspt;
         boolean running;
@@ -123,7 +153,9 @@ public final class EntityCensusCollector implements DiagnosticCollector {
         void begin(int seconds) {
             this.seconds = seconds;
             segment++;
-            segmentStartedNanos = System.nanoTime();
+            segmentStartedNanos = environment.nanoTime();
+            budget = new SliceBudget(segmentStartedNanos);
+            budgetExhaustedTicks = 0;
             startedAt = Instant.now().toString();
             startTick = environment.currentTick();
             startMspt = environment.averageTickTime();
@@ -135,10 +167,14 @@ public final class EntityCensusCollector implements DiagnosticCollector {
         }
 
         @Override public void run() {
-            long begin = System.nanoTime();
+            long begin = environment.nanoTime();
             String completion = null;
+            if (begin - segmentStartedNanos >= seconds * 1_000_000_000L) { finish("timeout"); return; }
+            long target = budget.next(begin);
+            if (target == 0) { budgetExhaustedTicks++; return; }      // this wall second's budget is spent
+            long millis = Math.max(1, (target + 999_999L) / 1_000_000L);
+            int maxEntities = (int) (ENTITIES_PER_SLICE_MILLI * millis), maxChunks = (int) (CHUNKS_PER_SLICE_MILLI * millis);
             try {
-                if (begin - segmentStartedNanos >= seconds * 1_000_000_000L) { completion = "timeout"; return; }
                 if (currentChunk != null && (environment.world(currentWorld.getUID()) != currentWorld
                         || !currentChunk.isLoaded() || !currentChunk.isEntitiesLoaded())) {
                     currentCoverage.skippedChunks++;
@@ -156,7 +192,7 @@ public final class EntityCensusCollector implements DiagnosticCollector {
                     humans.add(new EntitySample.Human(player.getUniqueId(), player.getWorld().getName(), location.getX(), location.getZ()));
                 }
                 int examinedThisTick = 0, chunksThisTick = 0;
-                while (System.nanoTime() - begin < SLICE_BUDGET_NANOS && examinedThisTick < 200 && chunksThisTick < 8) {
+                while (environment.nanoTime() - begin < target && examinedThisTick < maxEntities && chunksThisTick < maxChunks) {
                     if (seen.size() >= MAX_CAPTURE_ENTITIES) { completion = "capture_entity_limit"; break; }
                     if (attemptedEntities >= MAX_ENTITIES) { completion = "entity_limit"; break; }
                     if (entityIndex < entities.length) {
@@ -187,7 +223,7 @@ public final class EntityCensusCollector implements DiagnosticCollector {
                         currentCoverage = coverage.get(worldIndex++);
                         // Snapshot creation is not preemptible; its cost is included in slice telemetry.
                         currentCoverage.snapshotAvailable = environment.world(currentWorld.getUID()) == currentWorld;
-                        chunks = currentCoverage.snapshotAvailable ? currentWorld.getLoadedChunks() : new Chunk[0];
+                        chunks = currentCoverage.snapshotAvailable ? nearestPlayersFirst(currentWorld.getLoadedChunks(), currentWorld.getName(), humans) : new Chunk[0];
                         currentCoverage.snapshotChunks = chunks.length;
                         chunkIndex = 0;
                         continue;
@@ -210,7 +246,8 @@ public final class EntityCensusCollector implements DiagnosticCollector {
                 plugin.getLogger().log(Level.SEVERE, "Entity scan failed", e);
                 completion = "scan_error";
             } finally {
-                long elapsed = System.nanoTime() - begin;
+                long elapsed = environment.nanoTime() - begin;
+                budget.used(elapsed);
                 totalSliceNanos += elapsed;
                 maxSliceNanos = Math.max(maxSliceNanos, elapsed);
                 slices++;
@@ -233,7 +270,7 @@ public final class EntityCensusCollector implements DiagnosticCollector {
                     && coverage.stream().mapToLong(row -> row.attemptedEntities).sum()
                     == coverage.stream().mapToLong(row -> row.sampledEntities).sum());
             report.put("coverage", coverage.stream().map(Coverage::row).toList());
-            report.put("elapsedMillis", (System.nanoTime() - segmentStartedNanos) / 1_000_000);
+            report.put("elapsedMillis", (environment.nanoTime() - segmentStartedNanos) / 1_000_000);
             report.put("segmentDurationSeconds", seconds);
             report.put("serverTicks", environment.currentTick() - startTick);
             report.put("startMspt", startMspt);
@@ -245,13 +282,21 @@ public final class EntityCensusCollector implements DiagnosticCollector {
             report.put("errors", errors);
             report.put("slices", slices);
             report.put("totalSliceNanos", totalSliceNanos);
+            report.put("budgetMillisPerSecond", SliceBudget.BUDGET_NANOS_PER_SECOND / 1_000_000L);
+            report.put("budgetExhaustedTicks", budgetExhaustedTicks);
+            report.put("visitOrder", VISIT_ORDER);
             report.put("maxSliceNanos", maxSliceNanos);
             report.put("entityCount", detached.size());
             report.put("uniqueEntitiesAttempted", seen.size());
             report.put("limits", Map.of("entitiesPerSegment", MAX_ENTITIES, "chunksPerSegment", MAX_CHUNKS,
                     "entitiesPerCapture", MAX_CAPTURE_ENTITIES, "durationSeconds", seconds,
-                    "targetSliceMillis", 2, "entitiesPerTick", 200, "chunksPerTick", 8));
-            report.put("notes", "Incremental census, not a simultaneous snapshot. This file contains only this segment's entities/groups/sections; "
+                    "targetSliceMillis", SliceBudget.MAX_SLICE_NANOS / 1_000_000L,
+                    "entitiesPerTick", ENTITIES_PER_SLICE_MILLI * (SliceBudget.MAX_SLICE_NANOS / 1_000_000L),
+                    "chunksPerTick", CHUNKS_PER_SLICE_MILLI * (SliceBudget.MAX_SLICE_NANOS / 1_000_000L),
+                    "budgetMillisPerSecond", SliceBudget.BUDGET_NANOS_PER_SECOND / 1_000_000L));
+            report.put("notes", "Incremental census, not a simultaneous snapshot. Slice time is budgeted per wall second (budgetMillisPerSecond, slices target at most targetSliceMillis; "
+                    + "budgetExhaustedTicks ran no slice) and chunks nearest to humans are visited first within each world (visitOrder). "
+                    + "This file contains only this segment's entities/groups/sections; "
                     + "coverage and uniqueEntitiesAttempted are cumulative across resumed segments. complete describes traversal coverage across those segments. "
                     + "snapshotChunks=-1 means world not reached; unvisited/partial chunks expose unfinished coverage. "
                     + "Resume retains the original traversal and deduplication set, not an immutable world snapshot. New entities in already processed chunks are not revisited. "

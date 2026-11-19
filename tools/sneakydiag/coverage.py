@@ -3,13 +3,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from .loader import Capture
+from .loader import Capture, listener_totals
 from .util import ms, num
 
-NOTE = ("A plugin without a provider is UNMEASURED, not cheap: its event listeners, commands and per-tick hooks are "
-        "invisible to provider rankings. Ignite columns cover only Bukkit scheduler tasks (all of them, aggregated) and "
-        "the retained slow (>= threshold) listener and task calls; fast listener calls, packets, entity ticking and "
-        "work inside other plugins' calls are not attributed. Ignite times are inclusive and overlap provider sections, "
+NOTE = ("A plugin without a provider is UNMEASURED, not cheap: its commands, packet handlers and per-tick hooks are "
+        "invisible to provider rankings. Ignite columns cover Bukkit scheduler tasks (all of them, aggregated) and event "
+        "listeners: with listener totals every listener call (server-thread self time), otherwise only the retained slow "
+        "(>= threshold) listener calls. Packets, entity ticking and work inside other plugins' calls are not attributed. Ignite times are inclusive and overlap provider sections, "
         "so they rank gaps; they are not shares of tick time and must not be added to provider totals.")
 
 
@@ -19,6 +19,12 @@ def analyze_coverage(cap: Capture, providers: list[dict[str, Any]], scheduler: d
     by_name = {p["plugin"]: p for p in providers}
     ignite = (scheduler or {}).get("ignite") if isinstance((scheduler or {}).get("ignite"), dict) else None
     owners = _ignite_by_owner(ignite) if ignite else {}
+    totals = listener_totals(cap)
+    if totals is not None:
+        for r in totals["rows"]:
+            o = owners.setdefault(r["owner"], {})
+            o["listenerSelfNanos"] = o.get("listenerSelfNanos", 0) + r["selfNanos"]
+            o["listenerCalls"] = o.get("listenerCalls", 0) + r["calls"]
     slow_tasks = bool(ignite) and isinstance(ignite.get("slowExecutions"), dict)
     slow_listeners = bool(ignite) and isinstance(ignite.get("slowListeners"), dict)
     selection = cap.selected
@@ -41,7 +47,11 @@ def analyze_coverage(cap: Capture, providers: list[dict[str, Any]], scheduler: d
             "slowTaskCalls": int(o.get("slowTasks", 0)) if slow_tasks else None,
             "slowListenerCalls": int(o.get("slowListeners", 0)) if slow_listeners else None,
             "slowListenerMs": ms(o.get("slowListenerNanos", 0)) if slow_listeners else None,
-            "_rank": o.get("syncNanos", 0) + o.get("slowListenerNanos", 0),
+            "listenerSelfMs": ms(o.get("listenerSelfNanos", 0)) if totals is not None else None,
+            "listenerCalls": int(o.get("listenerCalls", 0)) if totals is not None else None,
+            # listener totals replace the slow-call sample when present: self time is additive and covers every call
+            "_rank": o.get("syncNanos", 0) + (o.get("listenerSelfNanos", 0) if totals is not None
+                                              else o.get("slowListenerNanos", 0)),
         }
         rows.append(row)
     measured = sorted((r for r in rows if r["_rank"] > 0), key=lambda r: r["_rank"], reverse=True)
@@ -59,6 +69,7 @@ def analyze_coverage(cap: Capture, providers: list[dict[str, Any]], scheduler: d
         "providerInventory": "captured" if inventory else "not captured",
         "igniteAvailable": ignite is not None,
         "slowListenerRecords": listeners is not None,
+        "listenerTotals": totals is not None,
         "rows": rows,
         "missingProvidersByMeasuredTime": [_gap(r) for r in gaps],
         "unknownProviderByMeasuredTime": [_gap(r) for r in unknown],
@@ -75,7 +86,8 @@ UNKNOWN = "unknown (plugins collector not captured)"
 
 
 def _gap(r: dict[str, Any]) -> dict[str, Any]:
-    return {k: r[k] for k in ("plugin", "igniteSyncTaskMs", "igniteSyncTaskRuns", "slowListenerCalls", "slowListenerMs")}
+    return {k: r[k] for k in ("plugin", "igniteSyncTaskMs", "igniteSyncTaskRuns", "listenerSelfMs", "listenerCalls",
+                              "slowListenerCalls", "slowListenerMs")}
 
 
 def _status(p: dict[str, Any] | None, selection: Any, inventory: bool = True) -> str:

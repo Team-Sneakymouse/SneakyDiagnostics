@@ -6,10 +6,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .correlate import correlate
-from .loader import Capture
+from .listeners import analyze_listeners
+from .loader import Capture, group_histogram
+from .spawns import analyze_spawns
 from .coverage import analyze_coverage
 from .providers import analyze_provider, slow_records
-from .util import ms, num, pct, scan_flags, top
+from .util import hist_upper_ns, ms, num, pct, scan_flags, top
 
 STANDARD_COLLECTORS = ("timeline", "scheduler", "entities", "plugins", "spark", "connections")
 
@@ -34,7 +36,9 @@ def analyze(cap: Capture, opts: Options | None = None) -> dict[str, Any]:
         "timeline": timeline,
         "providers": providers,
         "scheduler": analyze_scheduler(cap, opts.top),
+        "listeners": analyze_listeners(cap, opts.top),
         "entities": analyze_entities(cap, opts.top),
+        "spawns": analyze_spawns(cap, opts.top),
         "spark": analyze_spark_meta(cap),
         "connections": analyze_connections(cap),
         "options": {"top": opts.top, "slowMs": opts.slow_ms, "topWindows": opts.top_windows},
@@ -55,7 +59,7 @@ def analyze_inventory(cap: Capture, providers: list[dict[str, Any]]) -> dict[str
         for r in cap.reports.get(name, []):
             collectors.append({"collector": name, "segment": r.get("segment"), "reason": r.get("reason"),
                                "complete": r.get("complete"), "finishedAfterMillis": r.get("finishedAfterMillis"),
-                               "coverageFlags": scan_flags(r, depth=1)})
+                               "coverageFlags": scan_flags(r, depth=1), "detail": _collector_detail(name, r)})
     missing = [c for c in STANDARD_COLLECTORS if c not in cap.reports]
     return {
         "files": files, "collectors": collectors,
@@ -68,6 +72,18 @@ def analyze_inventory(cap: Capture, providers: list[dict[str, Any]]) -> dict[str
         "noProvidersNote": ("No registered providers means no plugin measurements, not zero plugin cost."
                             if not providers else None),
     }
+
+
+def _collector_detail(name: str, r: dict[str, Any]) -> str | None:
+    """Collection settings a reader needs to judge coverage (census budget and visit order)."""
+    if name != "entities":
+        return None
+    budget, order = r.get("budgetMillisPerSecond"), r.get("visitOrder")
+    if budget is None and order is None:
+        return "census budget 2 ms per tick, world order (written before the wall-clock budget)"
+    return (f"census budget {budget if budget is not None else '?'} ms per wall second (<= 10 ms slices), "
+            f"order {order or '?'}" + (f", {r['budgetExhaustedTicks']:g} ticks without budget"
+                                         if num(r.get("budgetExhaustedTicks")) else ""))
 
 
 # ------------------------------------------------------------------ timeline
@@ -167,6 +183,11 @@ def _pending_by_plugin(snapshot: dict[str, Any]) -> dict[str, dict[str, int]]:
     return out
 
 
+def _p99(group: dict[str, Any]) -> float | None:
+    upper = hist_upper_ns(group_histogram(group), 0.99)
+    return ms(upper) if upper is not None else None
+
+
 OLD_COMPANION = "not recorded (Ignite companion before slow-call records)"
 
 
@@ -191,6 +212,7 @@ def analyze_ignite(ig: dict[str, Any], n: int) -> dict[str, Any]:
              "taskClass": g.get("taskClass"), "caller": g.get("caller"),
              "started": num(g["counts"].get("started")), "throwing": num(g["counts"].get("throwing")),
              "totalMsInclusive": ms(num(g["counts"].get("totalNanos"))), "maxMs": ms(num(g["counts"].get("maxNanos"))),
+             "p99MsUpperBound": _p99(g),
              "firstOffsetMillis": g["counts"].get("firstOffsetMillis"),
              "lastOffsetMillis": g["counts"].get("lastOffsetMillis"),
              "_t": num(g["counts"].get("totalNanos"))} for g in groups]

@@ -89,7 +89,9 @@ public final class SchedulerCollector implements DiagnosticCollector, Listener {
                 var measurement = ignite.stop(finished.id());
                 report.put("ignite", measurement);
                 probeComplete = ((Number) measurement.get("droppedEvents")).longValue() == 0 && ((Number) measurement.get("droppedTaskIds")).longValue() == 0
-                        && ((Number) measurement.get("inFlightAtStop")).longValue() == 0;
+                        && ((Number) measurement.get("inFlightAtStop")).longValue() == 0
+                        // listener totals are aggregates too: a key overflow or untracked nesting makes them partial
+                        && !(measurement.get("listenerTotals") instanceof java.util.Map<?, ?> totals && Boolean.FALSE.equals(totals.get("complete")));
                 report.put("igniteComplete", probeComplete);
             } catch (Exception e) {
                 errors++;

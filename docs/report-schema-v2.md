@@ -5,7 +5,9 @@ against this document; change it first when a decision changes. v2 is a clean br
 report written by this release carries `"schemaVersion": 2` in its header. Tools read v1 and
 v2 and tell them apart by that field. The layouts of `entities`, `timeline`, `scheduler`,
 `spark` and `connections` reports are unchanged apart from compression and the compatible additions
-listed under [Tick identity](#tick-identity) and [Scheduler: Ignite slow calls](#scheduler-ignite-slow-calls).
+listed under [Tick identity](#tick-identity), [Scheduler: Ignite slow calls](#scheduler-ignite-slow-calls),
+[Scheduler: Ignite listener totals](#scheduler-ignite-listener-totals), [Timeline: spawns](#timeline-spawns) and
+[Entities: census budget](#entities-census-budget).
 
 ## Tick identity
 
@@ -133,8 +135,9 @@ shared probe emit this shape:
   `atTick` is the current tick (`Bukkit.getCurrentTick()`, see [Tick identity](#tick-identity)), not the timeline's
   tick number. `slowest` holds the 10 longest calls across all sections.
 - **Series:** windows are `[i*windowMillis, (i+1)*windowMillis)` of capture offset, aligned with the
-  timeline report's one-second windows. Only the 16 sections with the largest `totalNanos` are
-  included; `calls[i]` and `nanos[i]` are for window `i` (a call belongs to the window in which it ends;
+  timeline report's one-second windows. Only the sections with the largest `totalNanos` are
+  included: up to 64 (16 before 2026-11), fewer when their series would exceed 150,000 values
+  (`floor(150000 / (2 x windows + 3))`, 41 sections at 1,800 windows); readers accept any number; `calls[i]` and `nanos[i]` are for window `i` (a call belongs to the window in which it ends;
   `nanos` is inclusive wall time, like `totalNanos`). Windows with no calls are `0`.
 - **Count and level series** (same windows; added later in `probe/1`, so older reports have no `series.counts`,
   `series.levels` or `series.omitted`, and readers treat their absence as "no series", not as zero):
@@ -202,9 +205,87 @@ Compatible additions to `scheduler-1.json`'s `ignite` map (bridge protocol stays
   and must label the share an upper bound.
 - Each list keeps the `capacity` longest calls of at least `thresholdNanos`. `observed` counts every call over the
   threshold, `evicted = observed - retained`, `complete` is `observed == retained`. Eviction does not affect
-  `igniteComplete`.
+  `igniteComplete`. `capacity` is `max(512, 64 x capture seconds)`, at most 16,384 (companions before 2026-11: always
+  512); `limits.slowExecutions` / `limits.slowListeners` carry the same value.
 - Listener records time one listener's executor call, including nested events; scheduler records include listeners
   their task triggers. Records overlap each other and provider sections: sum only their union per thread.
+
+## Scheduler: Ignite listener totals
+
+Compatible additions to `scheduler-1.json`'s `ignite` map (2026-11, bridge protocol stays 1). Older companions omit
+them; readers report "not recorded", never zero.
+
+```json
+"listenerTotals": { "keys": 812, "maxKeys": 4096, "overflow": { "calls": 0, "totalNanos": 0 },
+                    "nestingOverflow": 0, "maxDepth": 64, "complete": true, "rows": [
+  { "owner": "SneakyItems", "listenerClass": "...", "eventClass": "org.bukkit.event.inventory.InventoryOpenEvent",
+    "priority": "LOWEST", "asyncEvent": false, "calls": 5120, "totalNanos": 0, "selfNanos": 0, "maxNanos": 0,
+    "otherThreadCalls": 0, "otherThreadNanos": 0, "histogramLog2": [0] } ],
+  "series": { "windowMillis": 1000, "maxOwners": 256, "omittedOwners": 0,
+              "owners": { "SneakyItems": { "totalNanos": [0], "selfNanos": [0] } } } },
+"groups": [ { "...existing fields...": 0, "histogramLog2": [0] } ]
+```
+
+- **Rows:** one per owner plugin x listener class x event class (the class of the event instance) x priority x async
+  flag, for **every** listener call made while recording, ordered by `selfNanos` descending. `calls`, `totalNanos`
+  (inclusive wall time, nested events included), `maxNanos` and `histogramLog2` cover all threads. `selfNanos` is
+  server-thread wall time minus the nested listener calls that ran inside the call (a depth stack; scheduler work or
+  plugin code not reached through an event is not subtracted), so self times add up across rows. Calls on other
+  threads have no self time and are also counted in `otherThreadCalls` / `otherThreadNanos`.
+- `histogramLog2` uses the shared probe's buckets (41 buckets, `floor(log2(nanos))`, see the probe/1 Percentiles bullet).
+- **Series:** `owners.<plugin>.totalNanos[i]` / `selfNanos[i]` are that owner's server-thread listener time in window
+  `i` (`[i*1000, (i+1)*1000)` ms of capture offset, by call end, aligned with the timeline). Owners with no time are
+  left out. Windows run to the stop (calls ending after the deadline count in the last window).
+- **Bounds:** at most 4,096 keys; calls of further keys are counted only in `overflow`. At most 256 owners have a
+  series (`omittedOwners` counts the rest; their rows are kept). Nesting deeper than 64 listener calls is counted in
+  `nestingOverflow` (the parent's self time then includes the deeper call). `complete` is false when any of the three
+  is non-zero, and then `igniteComplete` is false too. Labels are capped at 192 characters.
+- **Accounting:** `slowListeners.observedInvocations = sum(rows.calls) + overflow.calls + slowListeners.runningAtStop`,
+  exact when the stop runs on the server thread and no other-thread call races it.
+- `ServerTickEndEvent` listeners are included; their time lies outside the timeline's tick durations.
+- **Groups** (all events) gain `histogramLog2`: completed scopes by the same buckets, so distributions do not depend
+  on the capped slow-call list. Older groups have none (unknown).
+
+## Timeline: spawns
+
+Compatible addition to `timeline-1.json` (2026-11, public Paper API, no companion needed). Older timelines omit it;
+readers report "not recorded".
+
+```json
+"spawns": { "windowMillis": 1000, "observed": 1840, "keys": 12, "maxKeys": 512, "overflow": 0,
+            "droppedOffThread": 0, "attributedReasons": ["CUSTOM", "DEFAULT"], "complete": true, "rows": [
+  { "reason": "CUSTOM", "entityType": "ZOMBIE", "plugin": "SneakyShrine", "total": 300, "cancelled": 2,
+    "windows": [0, 4], "n": [12, 3] } ] },
+"spawnCollectionNanos": 400000
+```
+
+- Every `EntitySpawnEvent` (including `CreatureSpawnEvent`) seen at MONITOR priority while the timeline records, keyed
+  by spawn reason (`CreatureSpawnEvent.getSpawnReason()`, else `Entity.getEntitySpawnReason()`), entity type and, for
+  the `attributedReasons`, the spawning plugin. `total` counts spawns no listener cancelled; `cancelled` the others.
+- `windows[i]` / `n[i]`: the one-second windows (capture offset, like the timeline's) with non-cancelled spawns and how
+  many; windows not listed had none. Cancelled spawns have no windows.
+- `plugin` (CUSTOM and DEFAULT spawns only) is the first class on the spawning stack loaded by a plugin class loader
+  other than SneakyDiagnostics', `<unknown>` when none: a hint, not proof (a library or callback can stand between).
+- **Bounds:** at most 512 keys; further spawns count only in `observed` and `overflow`. Events off the server thread
+  are counted in `droppedOffThread` and not classified. `complete` is false when either is non-zero. Labels are capped at
+  128 characters. Rows are ordered by `total` descending.
+- `spawnCollectionNanos`: the listener's own server-thread time, outside `totalCollectionNanos`.
+
+## Entities: census budget
+
+Compatible additions to `entities-<n>.json` (2026-11):
+
+- `budgetMillisPerSecond` (50): slice time the census may use per wall second of its segment, spread over the ticks
+  expected in the rest of that second (from the last tick interval, never assumed shorter than 50 ms). A single slice
+  targets at most 10 ms; Paper calls are not preemptible, so `maxSliceNanos` can exceed it.
+- `budgetExhaustedTicks`: ticks on which the second's budget was already spent, so no slice ran.
+- `visitOrder` (`"players-first"`): within each world, loaded chunks are visited nearest to a human first (horizontal
+  distance in chunks to the nearest one at the time the world is reached); chunks in a world without humans keep their
+  order. Worlds keep their order.
+- `limits.targetSliceMillis`, `limits.entitiesPerTick` and `limits.chunksPerTick` keep their meaning as per-slice
+  targets and caps; they now report the values at the largest slice (10 ms, 1,000 entities, 40 chunks: caps scale
+  with the slice target at 100 entities and 4 chunks per millisecond). `limits.budgetMillisPerSecond` repeats the budget.
+- Census files without these fields used a fixed 2 ms per tick and world order.
 
 ## `manifest.json`
 
