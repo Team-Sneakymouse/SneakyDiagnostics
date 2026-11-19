@@ -6,7 +6,7 @@ Install `SneakyDiagnostics-Ignite-<version>.jar` in Ignite's `mods/` directory a
 
 The target is Paper 26.2+, with compilation and runtime verification against Paper 26.2 build 116, Java 25, and Ignite 1.2.1 (Mixin 0.8.7, MixinExtras 0.5.3). There is no exact Minecraft/Paper build-number gate. Recompilation is needed when the required internal scheduler contracts change, rather than for every release. Future releases have not been verified merely because their version is newer.
 
-Structural checks require scheduler/task/future constructors, cancellation methods, the runners map, task class access, async delegation into `CraftTask.run`, callable invocation, pending-queue execution of internal tasks, and listener dispatch through `RegisteredListener.callEvent` into `EventExecutor.execute` (Paper API; `PaperEventManager` calls it for every plugin listener). Required injection counts and Mixin validation add checks during transformation. A mismatch fails startup with an incompatibility error instead of silently producing partial measurements. These checks cannot prove unchanged semantics in a future implementation; run the runtime proof when updating Paper or Ignite. Velocity activates no scheduler Mixins. Server/loader classes are compile-only and excluded from the artifact. Mixins do not target versioned CraftBukkit packages or anonymous cancellation-runnable class names.
+Structural checks require scheduler/task/future constructors, cancellation methods, the runners map, task class access, async delegation into `CraftTask.run`, callable invocation, pending-queue execution of internal tasks, and listener dispatch through `RegisteredListener.callEvent` into `EventExecutor.execute` (Paper API; `PaperEventManager` calls it for every plugin listener). Required injection counts and Mixin validation add checks during transformation. A mismatch fails startup with an incompatibility error instead of silently producing partial measurements. These checks cannot prove unchanged semantics in a future implementation; run the runtime proof when updating Paper or Ignite. The tick-phase hooks add their own checks (see [Tick phases](#tick-phases)). Velocity activates no scheduler Mixins. Server/loader classes are compile-only and excluded from the artifact. Mixins do not target versioned CraftBukkit packages or anonymous cancellation-runnable class names.
 
 ## Measurements and limits
 
@@ -36,6 +36,39 @@ Groups are whole-capture aggregates. To place time on the timeline, the probe al
 
 State is bounded to 2,048 groups, 100,000 task identities, 100,000 cancellation IDs, up to 16,384 slow scheduler and 16,384 slow listener calls, 4,096 listener keys (41-long histograms each, about 3 MB at the cap) and 256 owner series of two longs per capture second (about 7 MB at 256 owners and 1,800 s), with 192-character labels. Overflow is explicit. In-flight scopes at stop are reported without a completed duration; late completions cannot mutate the detached report. Hooks bypass aggregation outside captures, and recording expires at the requested monotonic deadline even during a stalled tick. Hooks still add an idle branch and cancellation-origin field access. Instrumented execution uses synchronized aggregation and adds overhead, especially under concurrent async load.
 
+### Tick phases
+
+A second local MBean, `com.teamsneakymouse.sneakydiagnostics:type=ServerProbe` (protocol 1, same JDK-values-only rules), serves server-internal probes. `stop` returns one top-level key per probe; the tick phases are under `phases`. The plugin's `phases` collector (`/diagnostics phases start`, included in `all`) writes them to `phases-1.json`.
+
+For every server tick (current tick, so rows match the timeline's `firstCurrentTick..lastCurrentTick` and Ignite record ticks) the probe stores the exclusive server-thread time of each phase in microseconds. A nested phase is subtracted from its parent, so a tick's phases add up. Hooks (all Mojang-mapped, `remap = false`, call sites wrapped unless noted):
+
+| phase | hook |
+|---|---|
+| tick row | `MinecraftServer.processPacketsAndTick` head (`runServer` has just set `currentTickStart` and incremented `currentTick`) |
+| `tick-start-tasks` | `runAllTasksAtTickStart()` in `processPacketsAndTick` |
+| `scheduler` | `CraftScheduler.mainThreadHeartbeat()` (method wrapped) |
+| `level.<world>.other` | `ServerLevel.tick(BooleanSupplier)` in `tickChildren`, minus the phases below |
+| `level.<world>.entities` | `EntityTickList.forEach` in `ServerLevel.tick` |
+| `level.<world>.chunks` | `ServerChunkCache.tick(BooleanSupplier, boolean)` in `ServerLevel.tick`, minus tracker and spawning |
+| `level.<world>.tracker` | `ChunkMap.tick()` in `ServerChunkCache.tick` (Moonrise: it only calls `newTrackerTick`) |
+| `level.<world>.block-entities` | `tickBlockEntities()` in `ServerLevel.tick` |
+| `level.<world>.block-events` | `runBlockEvents()` in `ServerLevel.tick` |
+| `level.<world>.spawning.state` | both `NaturalSpawner.createState` calls in `ServerChunkCache.tickChunks` (mob-cap bookkeeping; runs whether or not mobs may spawn) |
+| `level.<world>.spawning.spawn` | `NaturalSpawner.spawnForChunk` in `ServerChunkCache.tickSpawningChunk` (only called when a category may spawn) |
+| `level.<world>.spawning.custom` | `ServerLevel.tickCustomSpawners` in `tickChunks` (phantoms, patrols, cats, wandering trader, sieges) |
+| `connections` | `ServerConnectionListener.tick()` in `MinecraftServer.tickConnection` (player connection ticks, including `ServerPlayer.doTick`; console commands run after it, in `other`) |
+| `diagnostics` | `RegisteredListener` executor calls and `CraftTask.run` of SneakyDiagnostics (census slices, timeline sampling, scheduler snapshots, spawn counts) |
+| `outside.tick-end` | the `ServerTickEndEvent.callEvent()` dispatch in `tickServer`, where Paper's measured duration is read |
+| `outside.diagnostics` | SneakyDiagnostics work during that dispatch or between ticks |
+
+Paper measures a tick from `currentTickStart` (taken at the top of the loop, before `processPacketsAndTick`) to just before the tick-end dispatch, so every in-tick phase lies inside it: `other = measured - phases`, exact in whole microseconds, and `null` for ticks without a measured duration (empty-server pauses, the tick a stop interrupts). The probe reads the measured duration itself (`event.getTickDuration()`), so it does not need the scheduler collector. Natural spawning is also counted per world: `createState` calls, `spawnForChunk` calls, those calls that tried to add at least one entity, the entities `NaturalSpawner.spawnCategoryForPosition` tried to add (before spawn events can cancel them), and custom-spawner calls.
+
+Structural checks (before any mixin applies, and again per target): each wrapped call site exists exactly as often as the mixin's `require`/`allow` (two `createState` calls, one of each other), `runServer` sets `currentTickStart` and increments `currentTick` before `processPacketsAndTick`, tick-start tasks run before `tickServer`, `tickServer` dispatches `ServerTickEndEvent` once and reads `currentTickStart`, and `ChunkMap.tick()` still calls `newTrackerTick`. `PhaseContractTest` runs them against the server JAR.
+
+Hot path: each hook reads one volatile field when idle. While recording, the server thread (the thread that started the capture) updates a fixed nesting stack (depth 32) and per-tick accumulators in plain arrays: no lock, no `ThreadLocal`, no allocation; other threads skip the hooks. World slots are cached on each `ServerLevel` per capture (one `getWorld().getName()` per world and capture); listener and task owners are cached on the registration/task (one name comparison each, ever). Recording starts at the tick after `start`, so the first row is a whole tick, and stops opening rows at the deadline.
+
+Bounds: capture seconds x 40 rows (`dropped` counts the rest; totals include them), 64 worlds (later worlds' time stays in their parent phase and they are listed in `omittedWorlds`), nesting depth 32 (`depthOverflow`), and at most 8,000,000 stored values (columns x capacity, 32 MB; a phase beyond that keeps its totals and is listed in `omittedSeries`, which only matters past about 100 phases in a 30-minute capture). Any of these, `nestingErrors` or `spanningTicks` makes the phases incomplete. `stop` must run on the server thread; called elsewhere it discards the phases and says so.
+
 The server classloader owns all probe state. A local Standard MBean, `com.teamsneakymouse.sneakydiagnostics:type=SchedulerProbe`, exposes protocol version 1, status, start, and stop using only JDK values. The plugin accesses it through the platform MBean server without linking companion classes. No remote JMX connector is opened by this project.
 
 ## Verification
@@ -45,7 +78,7 @@ The server classloader owns all probe state. A local Standard MBean, `com.teamsn
 .\gradlew.bat :ignite:test -PcompatibilityServerJar=D:/path/to/versions/26.2/paper-26.2.jar
 ```
 
-The second command verifies contracts against an extracted server JAR. Use the actual server JAR under `versions/`, not the Paperclip launcher. Contract tests also reject removed methods and changed internal execution paths; probe tests cover caps, attribution, expiration, and report isolation.
+The second command verifies scheduler, listener and tick-phase contracts against an extracted server JAR. Use the actual server JAR under `versions/`, not the Paperclip launcher. Contract tests also reject removed methods and changed internal execution paths; probe tests cover caps, attribution, expiration, and report isolation.
 
 For the optional runtime proof, prepare an ignored `.scratch/scheduler-proof/` directory containing `ignite.jar`, a Paper launcher named `paper.jar`, and its matching `cache/`, `versions/`, and `libraries/` directories from an isolated installation. No world, EULA acceptance, server configuration, or listener is needed: the proof uses a custom entrypoint instead of starting Minecraft.
 
@@ -56,3 +89,5 @@ For the optional runtime proof, prepare an ignored `.scratch/scheduler-proof/` d
 ```
 
 The task places companion and proof JARs in a dedicated `diagnostics-mods/` folder and uses the freshly built plugin JAR through a separate classloader. Keep that folder reserved for these two JARs. It checks sync/async/consumer/callable execution, checked and unchecked exception preservation (including a listener's `EventException`), individual/plugin/future cancellation, deferred attribution, slow scheduler and listener records, listener totals and group histograms, idle behavior, and bridge communication. Warm single-thread loops print indicative idle/recording costs for a task run and a listener call; they exclude creation/cancellation and are not a server TPS benchmark. On the development machine (2026-11-09, repeated runs) they printed 20-25 ns idle / 300-450 ns recording per task run and 6-15 ns idle / 50-60 ns recording per trivial listener call, executor included. With listener totals (2026-11-19, three runs each, same machine and session): 11-13 ns idle / 63-73 ns recording per listener call against 11-21 / 54-58 ns for the previous commit, and 83-85 ns when one registration receives two event classes in turn; task runs printed 369-380 ns recording against 281-352 ns. The spread between identical runs is noise of an unpinned loop. This proof does not exercise live command routing or a loaded Minecraft workload.
+
+The proof also defines every tick-phase target (`MinecraftServer`, `ServerLevel`, `ServerChunkCache`, `NaturalSpawner`) through real Ignite/Mixin, so a missing call site fails it, checks the `ServerProbe` MBean, records one tick with a SneakyDiagnostics task nested in the scheduler heartbeat and a SneakyDiagnostics listener (the heartbeat's self time excludes the nested task), and drives the plugin's phases bridge from its own classloader. The server, level and chunk hooks cannot run without a Minecraft server; they use the same frame code as the heartbeat hook. Phase costs (2026-11-19, three runs, median of five alternating rounds each, same machine): a task run or listener call of another plugin 7-8 ns idle and 7-8 ns recording (the owner check), of SneakyDiagnostics 7-11 ns idle and 47-53 ns recording (one phase frame), and an empty scheduler heartbeat 106-256 ns idle against 134-259 ns recording; the heartbeat's own run-to-run spread is larger than its phase frame. Per server tick a recording capture opens about 4 + 8 x worlds frames (a few microseconds at ~40 ns each), plus one per `spawnForChunk` call and per SneakyDiagnostics call.

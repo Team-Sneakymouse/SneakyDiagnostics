@@ -15,7 +15,7 @@ import org.bukkit.scheduler.BukkitTask;
 /** Executes real transformed scheduler classes without starting Minecraft, worlds, or a network listener. */
 public final class SchedulerProof {
     public static void main(String[] args) throws Exception {
-        try { prove(); System.out.println("PASS Ignite scheduler and listener hooks: sync/async/consumer/callable execution, exception preservation, cancellations, deferred attribution, slow-call records, and idle behavior"); System.exit(0); }
+        try { prove(); System.out.println("PASS Ignite scheduler, listener and tick-phase hooks: sync/async/consumer/callable execution, exception preservation, cancellations, deferred attribution, slow-call records, phase targets transformed, exclusive phases, and idle behavior"); System.exit(0); }
         catch (Throwable e) { e.printStackTrace(); System.exit(1); }
     }
     private static void prove() throws Exception {
@@ -102,8 +102,11 @@ public final class SchedulerProof {
         // Without a server there is no tick identity: the tick-end hook runs but records no interval.
         check(((List<?>) ((Map<?, ?>) report.get("measuredTicks")).get("tick")).isEmpty(), "Measured tick recorded without a tick identity");
         // Exercise the plugin's bridge in its own classloader, with no companion classes bundled there.
+        PhaseProof.prove(scheduler, owner);
         if (pluginJar != null) checkPluginBridge(pluginJar);
+        if (pluginJar != null) PhaseProof.checkPluginBridge(pluginJar);
         benchmark(scheduler, owner, calls, server, name);
+        PhaseProof.benchmark(scheduler, owner);
     }
     private static final String pluginJar = System.getProperty("sneakydiagnostics.proof.pluginJar");
     private static void checkPluginBridge(String path) throws Exception {

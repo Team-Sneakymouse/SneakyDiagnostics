@@ -28,12 +28,16 @@ public final class SchedulerMixins implements IMixinConfigPlugin {
                 new org.objectweb.asm.ClassReader(input).accept(node, 0);
                 SchedulerContract.verify(node);
             } catch (java.io.IOException e) { throw new IllegalStateException("Cannot verify listener target", e); }
+            PhaseContract.verifyAll(loader);
         }
     }
     @Override public String getRefMapperConfig() { return null; }
     @Override public boolean shouldApplyMixin(String target, String mixin) { return active; }
     @Override public void acceptTargets(Set<String> mine, Set<String> others) { }
-    @Override public List<String> getMixins() { return active ? List.of("SchedulerMixin", "TaskMixin", "FutureMixin", "ListenerMixin") : List.of(); }
-    @Override public void preApply(String target, ClassNode node, String mixin, IMixinInfo info) { SchedulerContract.verify(node); }
+    @Override public List<String> getMixins() { return active ? List.of("SchedulerMixin", "TaskMixin", "FutureMixin", "ListenerMixin",
+            "PhaseMixinServer", "PhaseMixinLevel", "PhaseMixinChunks", "PhaseMixinSpawner", "PhaseMixinScheduler", "PhaseMixinTask", "PhaseMixinListener") : List.of(); }
+    @Override public void preApply(String target, ClassNode node, String mixin, IMixinInfo info) {
+        if (!PhaseContract.verify(node)) SchedulerContract.verify(node);    // server classes only the phase hooks transform
+    }
     @Override public void postApply(String target, ClassNode node, String mixin, IMixinInfo info) { }
 }
