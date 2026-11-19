@@ -308,7 +308,7 @@ def _scheduler(s: dict[str, Any] | None) -> list[str]:
 def _tracker(t: dict[str, Any] | None) -> list[str]:
     o = _head("Tracker sends (packets-1.json)")
     if t is None:
-        return o + ["  no packets report: tracker send time not captured"]
+        return o + ["  not recorded (no packets collector in this capture; it needs the Ignite companion, 2026-11): tracker send time is absent, not zero"]
     o.append(f"  reason={t['reason']} complete={t['complete']}  Ignite: {t['igniteAvailability']}")
     if not t["available"]:
         o.append("  " + t["note"])

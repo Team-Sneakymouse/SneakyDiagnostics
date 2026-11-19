@@ -68,8 +68,8 @@ public final class PhasesCollector implements DiagnosticCollector, Listener {
         report.put("available", probeActive);
         if (probeActive) {
             try {
-                Object phases = probe.stop(finished.id()).get("phases");
-                if (!(phases instanceof Map<?, ?> map)) throw new IllegalStateException("Server probe returned no phases");
+                Map<String, Object> map = probe.stop(finished.id());
+                if (map == null) throw new IllegalStateException("Server probe returned no phases");
                 for (var entry : map.entrySet()) {
                     if (entry.getKey() instanceof String key && !HEADER_FIELDS.contains(key)) report.put(key, entry.getValue());
                 }

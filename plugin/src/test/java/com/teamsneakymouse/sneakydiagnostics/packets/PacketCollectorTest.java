@@ -88,18 +88,21 @@ class PacketCollectorTest {
         long startedNanos;
         int seconds, protocol = 1;
         Map<String, Object> tracker;
-        @Override public Object getAttribute(String name) { return name.equals("ProtocolVersion") ? protocol : "available, idle"; }
+        @Override public Object getAttribute(String name) { return name.equals("ProtocolVersion") ? protocol : "phases available, idle; tracker available, idle"; }
         @Override public void setAttribute(Attribute attribute) { throw new UnsupportedOperationException(); }
         @Override public AttributeList getAttributes(String[] names) { return new AttributeList(); }
         @Override public AttributeList setAttributes(AttributeList attributes) { return new AttributeList(); }
         @Override public Object invoke(String operation, Object[] args, String[] signature) {
             if (operation.equals("start")) {
-                assertArrayEquals(new String[]{"java.lang.String", "long", "int"}, signature);
-                id = (String) args[0]; startedNanos = (Long) args[1]; seconds = (Integer) args[2];
+                assertArrayEquals(new String[]{"java.lang.String", "java.lang.String", "long", "int"}, signature);
+                assertEquals("tracker", args[0]);
+                id = (String) args[1]; startedNanos = (Long) args[2]; seconds = (Integer) args[3];
                 return null;
             }
             assertEquals("stop", operation);
-            assertEquals(id, args[0]);
+            assertArrayEquals(new String[]{"java.lang.String", "java.lang.String"}, signature);
+            assertEquals("tracker", args[0]);
+            assertEquals(id, args[1]);
             return Map.of("captureId", id, "tracker", tracker);
         }
         @Override public MBeanInfo getMBeanInfo() { return new MBeanInfo(getClass().getName(), "control", null, null, null, null); }

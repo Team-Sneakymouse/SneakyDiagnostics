@@ -15,7 +15,7 @@ import org.bukkit.scheduler.BukkitTask;
 /** Executes real transformed scheduler classes without starting Minecraft, worlds, or a network listener. */
 public final class SchedulerProof {
     public static void main(String[] args) throws Exception {
-        try { prove(); System.out.println("PASS Ignite scheduler, listener and tick-phase hooks: sync/async/consumer/callable execution, exception preservation, cancellations, deferred attribution, slow-call records, phase targets transformed, exclusive phases, and idle behavior; tracker send hooks applied to ServerEntity and the server bridge answers"); System.exit(0); }
+        try { prove(); System.out.println("PASS Ignite scheduler, listener and tick-phase hooks: sync/async/consumer/callable execution, exception preservation, cancellations, deferred attribution, slow-call records, phase targets transformed, exclusive phases, and idle behavior; tracker send hooks applied to ServerEntity; both server probes record one capture by name through the server bridge"); System.exit(0); }
         catch (Throwable e) { e.printStackTrace(); System.exit(1); }
     }
     private static void prove() throws Exception {
@@ -153,7 +153,8 @@ public final class SchedulerProof {
             check(tracker != null && Long.valueOf(0).equals(tracker.get("calls")) && Boolean.TRUE.equals(tracker.get("complete")),
                     "Empty tracker capture across classloaders failed: " + tracker);
         }
-        check(server.getAttribute(name, "Status").equals("available, idle"), "Tracker probe did not return to idle");
+        check(server.getAttribute(name, "Status").equals("phases available, idle; tracker available, idle"),
+                "Server probes did not return to idle: " + server.getAttribute(name, "Status"));
     }
     private static void pause(long millis) {
         long end = System.nanoTime() + millis * 1_000_000L;

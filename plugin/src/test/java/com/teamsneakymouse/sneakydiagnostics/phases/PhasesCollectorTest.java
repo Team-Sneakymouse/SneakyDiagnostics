@@ -53,7 +53,6 @@ class PhasesCollectorTest {
         String json = new String(com.teamsneakymouse.sneakydiagnostics.report.StoredFile.serialize(sink.report)).replaceAll("\\s", "");
         assertTrue(json.contains("\"phases\":{\"scheduler\":[1000]}"), json);
         assertEquals("shared", sink.report.get("captureId"), "the header's capture ID is kept");
-        assertFalse(sink.report.containsKey("tracker"), "only the phases key belongs to this report");
     }
 
     @Test void theCaptureStopsAtItsDeadlineOnTickEnd() throws Exception {
@@ -89,7 +88,11 @@ class PhasesCollectorTest {
         var control = register(server);
         var bridge = new IgniteServerProbe(server);
         assertTrue(bridge.available());
-        assertTrue(bridge.status().startsWith("Ignite phases"));
+        assertEquals("Ignite phases available, idle", bridge.status(), "only this probe's part of the status");
+        control.status = "tracker available, idle";
+        assertFalse(bridge.available(), "a companion without the phases probe");
+        assertTrue(bridge.status().contains("without the phases probe"));
+        control.status = "phases available, idle";
         control.protocol = 2;
         assertFalse(bridge.available());
         assertTrue(bridge.status().contains("incompatible"));
@@ -107,23 +110,27 @@ class PhasesCollectorTest {
     private static final class Control implements DynamicMBean {
         String id;
         int seconds, protocol = 1;
+        String status = "phases available, idle; tracker available, idle";
         boolean fail;
         final Map<String, Object> phases = new LinkedHashMap<>(Map.of("schema", "sneakydiagnostics.phases/1", "captureId", "ignored",
                 "complete", true, "phases", Map.of("scheduler", new int[]{1000})));
-        @Override public Object getAttribute(String name) { return name.equals("ProtocolVersion") ? protocol : "phases available, idle"; }
+        @Override public Object getAttribute(String name) { return name.equals("ProtocolVersion") ? protocol : status; }
         @Override public void setAttribute(Attribute attribute) { throw new UnsupportedOperationException(); }
         @Override public AttributeList getAttributes(String[] names) { return new AttributeList(); }
         @Override public AttributeList setAttributes(AttributeList attributes) { return new AttributeList(); }
         @Override public Object invoke(String operation, Object[] args, String[] signature) {
             if (operation.equals("start")) {
-                assertArrayEquals(new String[]{"java.lang.String", "long", "int"}, signature);
-                id = (String) args[0]; seconds = (Integer) args[2];
+                assertArrayEquals(new String[]{"java.lang.String", "java.lang.String", "long", "int"}, signature);
+                assertEquals("phases", args[0]);
+                id = (String) args[1]; seconds = (Integer) args[3];
                 return null;
             }
             assertEquals("stop", operation);
-            assertEquals(id, args[0]);
+            assertArrayEquals(new String[]{"java.lang.String", "java.lang.String"}, signature);
+            assertEquals("phases", args[0]);
+            assertEquals(id, args[1]);
             if (fail) throw new IllegalStateException("boom");
-            return Map.of("protocolVersion", 1, "captureId", id, "phases", phases, "tracker", Map.of("not", "ours"));
+            return phases;
         }
         @Override public MBeanInfo getMBeanInfo() { return new MBeanInfo(getClass().getName(), "control", null, null, null, null); }
     }

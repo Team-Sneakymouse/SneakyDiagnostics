@@ -41,7 +41,7 @@ def test_capture_without_packets_report_says_so_and_lists_it_not_captured(tmp_pa
     r = run(fx.v2_capture(tmp_path))
     assert r["tracker"] is None
     assert "packets" in r["inventory"]["collectorsNotCaptured"]
-    assert "tracker send time not captured" in render(r)
+    assert "not recorded (no packets collector" in render(r)
 
 
 def test_incomplete_tracker_and_inconsistent_sums_are_flagged(tmp_path):

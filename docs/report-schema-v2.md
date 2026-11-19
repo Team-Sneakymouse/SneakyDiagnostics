@@ -8,8 +8,8 @@ v2 and tell them apart by that field. The layouts of `entities`, `timeline`, `sc
 listed under [Tick identity](#tick-identity), [Scheduler: Ignite slow calls](#scheduler-ignite-slow-calls),
 [Scheduler: Ignite listener totals](#scheduler-ignite-listener-totals), [Timeline: spawns](#timeline-spawns) and
 [Entities: census budget](#entities-census-budget). [Tick phases](#tick-phases-phases-1json) (`phases-1.json`) is a new
-collector file, also a compatible addition, and so is the tracker part of
-[`packets-1.json`](#packets-1json-tracker-sends); captures without either file are read as "not captured".
+collector file, also a compatible addition, and so is [`packets-1.json`](#packets-1json-tracker-sends) (tracker sends
+today). Captures without either file did not run that collector; readers say "not recorded".
 
 ## Tick identity
 
@@ -290,10 +290,38 @@ Compatible additions to `entities-<n>.json` (2026-11):
   with the slice target at 100 entities and 4 chunks per millisecond). `limits.budgetMillisPerSecond` repeats the budget.
 - Census files without these fields used a fixed 2 ms per tick and world order.
 
+## Ignite `ServerProbe` MBean (protocol 1)
+
+The companion's second local MBean, `com.teamsneakymouse.sneakydiagnostics:type=ServerProbe`, controls the
+server-internal probes behind `phases-1.json` and `packets-1.json`. It is separate from the scheduler bridge
+(`type=SchedulerProbe`, protocol 1, unchanged). Only JDK values cross it:
+
+| member | meaning |
+|---|---|
+| `ProtocolVersion` | `1` |
+| `Status` | every probe's state, `"; "`-separated, in registry order: `phases available, idle; tracker recording <captureId>` |
+| `start(String probe, String captureId, long startedNanos, int seconds)` | starts that probe; server thread |
+| `stop(String probe, String captureId)` → `Map` | stops that probe and returns its result; server thread |
+
+- **Probes by name:** `phases` (tick phases) and `tracker` (entity-tracker sends). Each probe owns its own capture, so
+  several probes can record the same capture ID at once (`/diagnostics all` starts both) and each can run alone. A
+  second `start` of the same probe fails until it is stopped; `stop` checks the capture ID per probe. An unknown name
+  fails with `IllegalArgumentException` ("Unknown server probe '<name>'; known: phases, tracker"); JMX wraps it in a
+  `RuntimeMBeanException`.
+- **Results:** every result map holds `captureId`. `phases` returns the `phases-1.json` fields at top level (with
+  `schema: "sneakydiagnostics.phases/1"`). `tracker` returns `{captureId, tracker}`: its `packets-1.json` section under
+  its name. A later packet probe returns its own sections the same way.
+- **Availability:** a plugin bridge treats the probe as available when the MBean is registered, `ProtocolVersion` is 1
+  and `Status` lists the probe's name. A probe added later (`packets` is planned) joins the registry without a protocol
+  change; a bridge sees an older companion as "without the <name> probe".
+- **Protocol stays 1:** the named start/stop replaced the single-probe signature from the tick-phases and tracker
+  branches before anything using this MBean was released or deployed, so no reader or companion with the older shape
+  exists.
+
 ## Tick phases: `phases-1.json`
 
 New collector file (2026-11, compatible addition; `/diagnostics phases start [seconds]`, included in `all`). It needs
-the Ignite companion's `ServerProbe` MBean (protocol 1). Captures without the file did not run the collector: readers
+the Ignite companion's [`ServerProbe` MBean](#ignite-serverprobe-mbean-protocol-1) (probe `phases`). Captures without the file did not run the collector: readers
 report tick phases as "not recorded", never as zero. Standard header plus:
 
 ```json
@@ -363,9 +391,10 @@ report tick phases as "not recorded", never as zero. Standard header plus:
 ## `packets-1.json` (tracker sends)
 
 Collector `packets` (`/diagnostics packets start [seconds]`, included in `all`, permission
-`sneakydiagnostics.packets`). Today it holds only the entity tracker's send time, measured by the Ignite companion
-through a second bridge, `com.teamsneakymouse.sneakydiagnostics:type=ServerProbe` (protocol 1); the scheduler bridge
-is unchanged. Outbound/inbound packet counts may be added to this file later as compatible additions.
+`sneakydiagnostics.packets`). Today it holds only the entity tracker's send time, measured by the Ignite companion's
+[`ServerProbe` MBean](#ignite-serverprobe-mbean-protocol-1) (probe `tracker`). The file will later gain per-packet-class
+outbound sections, other send causes and inbound sections; those are compatible additions, and readers report a missing
+section as "not recorded", never zero.
 
 Standard header plus `startedAt`, `igniteAvailability`, `errors`, `notes`, optionally `igniteError`, and:
 

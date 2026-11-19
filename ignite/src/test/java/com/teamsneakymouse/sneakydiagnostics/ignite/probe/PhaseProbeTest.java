@@ -226,17 +226,4 @@ class PhaseProbeTest {
         assertTrue(((String) report.get("error")).contains("server thread"));
         assertEquals("available, idle", PhaseProbe.status());
     }
-
-    @Test void controlNestsThePhasesUnderOneKey() {
-        var control = new ServerControl();
-        assertEquals(1, control.getProtocolVersion());
-        id = "control";
-        control.start("control", time.get(), 5);
-        assertTrue(control.getStatus().startsWith("phases starting"));
-        var report = control.stop("control");
-        id = null;
-        assertEquals(1, report.get("protocolVersion"));
-        assertEquals("sneakydiagnostics.phases/1", map(report, "phases").get("schema"));
-        assertThrows(IllegalStateException.class, () -> control.stop("control"));
-    }
 }

@@ -20,6 +20,8 @@ import org.bukkit.plugin.Plugin;
  */
 final class PhaseProof {
     private static final String NAME = "com.teamsneakymouse.sneakydiagnostics:type=ServerProbe";
+    private static final String IDLE = "phases available, idle; tracker available, idle";
+    private static final String[] START = {"java.lang.String", "java.lang.String", "long", "int"}, STOP = {"java.lang.String", "java.lang.String"};
     private static final List<String> TARGETS = List.of("net.minecraft.server.MinecraftServer", "net.minecraft.server.level.ServerLevel",
             "net.minecraft.server.level.ServerChunkCache", "net.minecraft.world.level.NaturalSpawner");
 
@@ -30,7 +32,7 @@ final class PhaseProof {
         ObjectName name = new ObjectName(NAME);
         check(server.isRegistered(name), "Server probe MBean missing");
         check(Integer.valueOf(1).equals(server.getAttribute(name, "ProtocolVersion")), "Wrong server probe protocol");
-        check("phases available, idle".equals(server.getAttribute(name, "Status")), "Server probe not idle: " + server.getAttribute(name, "Status"));
+        check(IDLE.equals(server.getAttribute(name, "Status")), "Server probe not idle: " + server.getAttribute(name, "Status"));
         // Defining a target applies its mixins; a missing call site fails here (require = allow = expected count).
         ClassLoader loader = PhaseProof.class.getClassLoader();
         for (String target : TARGETS) {
@@ -43,7 +45,7 @@ final class PhaseProof {
 
         Plugin diagnostics = plugin(PhaseProbe.DIAGNOSTICS_PLUGIN);
         var otherRuns = new AtomicInteger();
-        server.invoke(name, "start", new Object[]{"phase-proof", System.nanoTime(), 60}, new String[]{"java.lang.String", "long", "int"});
+        server.invoke(name, "start", new Object[]{"phases", "phase-proof", System.nanoTime(), 60}, START);
         check(PhaseProbe.active() == null, "Recording must begin at the next tick");
         PhaseProbe.tickBegin(1);
         scheduler.runTask(diagnostics, (Runnable) () -> pause(3));                     // a census slice inside the heartbeat
@@ -55,8 +57,7 @@ final class PhaseProof {
         check(session != null, "Tick end not recorded");
         session.tickEndDone();
         PhaseProbe.tickBegin(2);
-        Map<?, ?> stopped = (Map<?, ?>) server.invoke(name, "stop", new Object[]{"phase-proof"}, new String[]{"java.lang.String"});
-        Map<?, ?> report = (Map<?, ?>) stopped.get("phases");
+        Map<?, ?> report = (Map<?, ?>) server.invoke(name, "stop", new Object[]{"phases", "phase-proof"}, STOP);
         check(otherRuns.get() == 1, "Phase hooks changed task execution");
         Map<?, ?> phases = (Map<?, ?>) report.get("phases");
         long diagnosticsMicros = first(phases, "diagnostics"), schedulerMicros = first(phases, "scheduler");
@@ -64,7 +65,31 @@ final class PhaseProof {
         check(schedulerMicros >= 2_000 && schedulerMicros < 3_000 + 1_000, "Heartbeat self time must exclude the nested diagnostics task: " + schedulerMicros);
         check(first((Map<?, ?>) report, "ticks", "measuredMicros") == 10_000, "Measured tick duration not recorded");
         check(((List<?>) report.get("other")).getFirst() instanceof Number, "other must be known for a measured tick");
-        check("phases available, idle".equals(server.getAttribute(name, "Status")), "Server probe did not return to idle");
+        check(IDLE.equals(server.getAttribute(name, "Status")), "Server probe did not return to idle");
+        proveNamedProbes(server, name);
+    }
+
+    /** Through JMX, as {@code /diagnostics all} does: both probes record one capture, each stops alone, unknown names fail. */
+    private static void proveNamedProbes(MBeanServer server, ObjectName name) throws Exception {
+        long started = System.nanoTime();
+        server.invoke(name, "start", new Object[]{"phases", "both", started, 60}, START);
+        server.invoke(name, "start", new Object[]{"tracker", "both", started, 60}, START);
+        check("phases starting both at the next tick; tracker recording both".equals(server.getAttribute(name, "Status")),
+                "Both probes must record the same capture: " + server.getAttribute(name, "Status"));
+        Map<?, ?> tracker = (Map<?, ?>) server.invoke(name, "stop", new Object[]{"tracker", "both"}, STOP);
+        check("both".equals(tracker.get("captureId")) && tracker.get("tracker") instanceof Map, "Tracker stop through JMX failed: " + tracker);
+        check("phases starting both at the next tick; tracker available, idle".equals(server.getAttribute(name, "Status")),
+                "Stopping the tracker must leave the phases capture: " + server.getAttribute(name, "Status"));
+        Map<?, ?> phases = (Map<?, ?>) server.invoke(name, "stop", new Object[]{"phases", "both"}, STOP);
+        check("both".equals(phases.get("captureId")) && "sneakydiagnostics.phases/1".equals(phases.get("schema")), "Phase stop through JMX failed: " + phases);
+        try {
+            server.invoke(name, "start", new Object[]{"packets", "unknown", started, 60}, START);
+            check(false, "An unknown probe name must be rejected");
+        } catch (javax.management.RuntimeMBeanException e) {
+            check(e.getCause() instanceof IllegalArgumentException && e.getCause().getMessage().contains("Unknown server probe 'packets'"),
+                    "Unknown probe rejected with the wrong error: " + e.getCause());
+        }
+        check(IDLE.equals(server.getAttribute(name, "Status")), "Server probes did not return to idle");
     }
 
     static void benchmark(CraftScheduler scheduler, Plugin other) throws Exception {
@@ -86,11 +111,10 @@ final class PhaseProof {
         long[][] idleRounds = new long[bodies.length][ROUNDS], recordingRounds = new long[bodies.length][ROUNDS];
         for (int round = 0; round < ROUNDS; round++) {
             for (int i = 0; i < bodies.length; i++) idleRounds[i][round] = loop(bodies[i]);
-            server.invoke(name, "start", new Object[]{"phase-benchmark", System.nanoTime(), 60}, new String[]{"java.lang.String", "long", "int"});
+            server.invoke(name, "start", new Object[]{"phases", "phase-benchmark", System.nanoTime(), 60}, START);
             PhaseProbe.tickBegin(round);
             for (int i = 0; i < bodies.length; i++) recordingRounds[i][round] = loop(bodies[i]);
-            Map<?, ?> report = (Map<?, ?>) ((Map<?, ?>) server.invoke(name, "stop", new Object[]{"phase-benchmark"},
-                    new String[]{"java.lang.String"})).get("phases");
+            Map<?, ?> report = (Map<?, ?>) server.invoke(name, "stop", new Object[]{"phases", "phase-benchmark"}, STOP);
             Map<?, ?> totals = (Map<?, ?>) report.get("totals");
             long diagnosticsCalls = ((Number) ((Map<?, ?>) totals.get("diagnostics")).get("calls")).longValue();
             check(diagnosticsCalls == 2L * (WARMUP + COUNT), "Diagnostics phase lost benchmark calls: " + diagnosticsCalls);
@@ -117,7 +141,7 @@ final class PhaseProof {
                     .newInstance("plugin-phases", "proof", System.nanoTime(), 0, 60);
             var start = type.getDeclaredMethod("start", contextType); start.setAccessible(true); start.invoke(bridge, context);
             var stop = type.getDeclaredMethod("stop", String.class); stop.setAccessible(true);
-            Map<?, ?> phases = (Map<?, ?>) ((Map<?, ?>) stop.invoke(bridge, "plugin-phases")).get("phases");
+            Map<?, ?> phases = (Map<?, ?>) stop.invoke(bridge, "plugin-phases");
             check(phases != null && "plugin-phases".equals(phases.get("captureId")), "Cross-classloader phase capture failed");
         }
     }

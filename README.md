@@ -12,7 +12,7 @@ Copy `plugin/build/libs/SneakyDiagnostics-<version>.jar` (not the sources JAR) t
 
 The same JAR also installs in Velocity's `plugins/` folder. It contains independent Paper and Velocity entry points and shared connection-reporting code; no separate proxy companion is needed. Install it in both processes to compare their observations. Velocity does not load the Paper collectors or require Ignite. Both processes must support Java 25.
 
-For scheduler execution and cancellation attribution and for tick phases, copy `ignite/build/libs/SneakyDiagnostics-Ignite-<version>.jar` to Ignite's `mods/` directory and restart. Keep only one companion version installed. Scheduler captures automatically include its measurements when available, and the `phases` collector needs it; status reports availability. The tested baseline is Paper 26.2 build 116 with Ignite 1.2.1. Later releases are accepted when the required hook contracts remain compatible, without an exact build-number gate. See the [companion documentation](ignite/README.md) for compatibility and runtime checks.
+For scheduler execution and cancellation attribution, tick phases and entity-tracker send timing, copy `ignite/build/libs/SneakyDiagnostics-Ignite-<version>.jar` to Ignite's `mods/` directory and restart. Keep only one companion version installed. Scheduler captures automatically include its measurements when available, and the `phases` and `packets` collectors need it; status reports availability. The tested baseline is Paper 26.2 build 116 with Ignite 1.2.1. Later releases are accepted when the required hook contracts remain compatible, without an exact build-number gate. See the [companion documentation](ignite/README.md) for compatibility and runtime checks.
 
 ## Repository layout
 
@@ -55,6 +55,7 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 | `/diagnostics timeline` | `start [seconds]` | `sneakydiagnostics.timeline` |
 | `/diagnostics scheduler` | `start [seconds]` | `sneakydiagnostics.scheduler` |
 | `/diagnostics phases` | `start [seconds]` | `sneakydiagnostics.phases` |
+| `/diagnostics packets` | `start [seconds]` | `sneakydiagnostics.packets` |
 | `/diagnostics plugins` | `start [seconds] [provider ...]` | `sneakydiagnostics.plugins` |
 | `/diagnostics spark` | `start [seconds]` | `sneakydiagnostics.spark` |
 | `/diagnostics connections` | `start [seconds] [player ...]` | `sneakydiagnostics.connections` |
@@ -106,7 +107,7 @@ CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have ac
 
 For publishing from a local checkout, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishAll`. The original `publishMavenPublicationToSneakyrpRepository` command remains an alias that publishes the API, plugin and companion. Never commit credentials. Root `publishToMavenLocal` can verify all three publications without remote credentials.
 
-`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, `scheduler`, `phases`, and `integration` own their collection state. The Paper plugin uses public APIs; the optional Ignite companion instruments scheduler and tick internals. There is no automatic capture.
+`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, `scheduler`, `phases`, `packets`, and `integration` own their collection state. The Paper plugin uses public APIs; the optional Ignite companion instruments scheduler and tick internals. There is no automatic capture.
 
 The original entity fields, chunk groups, and `entities-*.json` filename pattern are preserved; capture identity, coverage, and sections are additive. Files now live in capture subdirectories; resumed files contain separate segments. Update collection/analysis scripts to discover those directories and combine segments rather than assuming one file is the entire census. Remove the old `SneakyEntityCensus` JAR when installing this plugin to avoid duplicate `/entitycensus` registrations.
 
