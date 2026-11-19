@@ -4,7 +4,7 @@ import java.util.Map;
 
 /**
  * Local classloader-neutral control protocol (protocol 1) for server-internal probes, each addressed by name
- * ({@code phases}, {@code tracker}). Probes record independently, so several can capture at once. Separate from the
+ * ({@code phases}, {@code tracker}, {@code packets}). Probes record independently, so several can capture at once. Separate from the
  * scheduler bridge, so that protocol stays unchanged. No remotely exposed connector is opened.
  */
 public interface ServerControlMBean {

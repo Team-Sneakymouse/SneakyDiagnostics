@@ -6,7 +6,7 @@ import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin;
 import org.spongepowered.asm.mixin.extensibility.IMixinInfo;
 
-/** Selects Paper before target discovery and verifies structural contracts (scheduler, listener dispatch, tick phases, tracker sends), not release numbers. */
+/** Selects Paper before target discovery and verifies structural contracts (scheduler, listener dispatch, tick phases, tracker sends, packets), not release numbers. */
 public final class SchedulerMixins implements IMixinConfigPlugin {
     private boolean active;
     @Override public void onLoad(String mixinPackage) {
@@ -37,23 +37,30 @@ public final class SchedulerMixins implements IMixinConfigPlugin {
                     TrackerContract.verify(node);
                 } catch (java.io.IOException e) { throw new IllegalStateException("Cannot verify tracker target: " + name, e); }
             }
+            PacketContract.verifyAll(loader);
         }
     }
     @Override public String getRefMapperConfig() { return null; }
     @Override public boolean shouldApplyMixin(String target, String mixin) { return active; }
     @Override public void acceptTargets(Set<String> mine, Set<String> others) { }
-    @Override public List<String> getMixins() { return active ? List.of("SchedulerMixin", "TaskMixin", "FutureMixin", "ListenerMixin",
+    /** Every mixin; the packet probe's are the {@code PacketMixin*} ones. */
+    static final List<String> MIXINS = List.of("SchedulerMixin", "TaskMixin", "FutureMixin", "ListenerMixin",
             "PhaseMixinServer", "PhaseMixinLevel", "PhaseMixinChunks", "PhaseMixinSpawner", "PhaseMixinScheduler", "PhaseMixinTask", "PhaseMixinListener",
-            "ServerEntityMixin") : List.of(); }
+            "ServerEntityMixin",
+            "PacketMixinConnection", "PacketMixinInbound", "PacketMixinServer", "PacketMixinTracker", "PacketMixinEntity", "PacketMixinLiving",
+            "PacketMixinLevel", "PacketMixinPlayers", "PacketMixinCraftPlayer", "PacketMixinChunkSender", "PacketMixinChunkLoader");
+    @Override public List<String> getMixins() { return active ? MIXINS : List.of(); }
     /**
-     * Re-verifies each target against every contract that covers it. No class is transformed by both a phase and the
-     * tracker hook today (ChunkMap is in both contracts but only read at load), but a shared target would satisfy both.
+     * Re-verifies each target against every contract that covers it, so a class transformed by several hook sets
+     * satisfies all of them: {@code ServerEntity} (tracker and packets), {@code ServerLevel} and {@code MinecraftServer}
+     * (tick phases and packets). {@code ChunkMap} is in the tracker and phase contracts but only read at load.
      */
     @Override public void preApply(String target, ClassNode node, String mixin, IMixinInfo info) {
-        boolean tracker = TrackerContract.covers(node.name);
-        if (tracker) TrackerContract.verify(node);
-        boolean phaseOnly = PhaseContract.verify(node);                     // server classes only the phase hooks transform
-        if (!tracker && !phaseOnly) SchedulerContract.verify(node);
+        boolean covered = false;
+        if (TrackerContract.covers(node.name)) { TrackerContract.verify(node); covered = true; }
+        if (PacketContract.covers(node.name)) { PacketContract.verify(node); covered = true; }
+        if (PhaseContract.verify(node)) covered = true;                     // server classes the phase hooks transform
+        if (!covered) SchedulerContract.verify(node);
     }
     @Override public void postApply(String target, ClassNode node, String mixin, IMixinInfo info) { }
 }

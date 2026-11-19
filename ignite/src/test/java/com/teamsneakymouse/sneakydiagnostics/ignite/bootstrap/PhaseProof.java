@@ -20,7 +20,7 @@ import org.bukkit.plugin.Plugin;
  */
 final class PhaseProof {
     private static final String NAME = "com.teamsneakymouse.sneakydiagnostics:type=ServerProbe";
-    private static final String IDLE = "phases available, idle; tracker available, idle";
+    private static final String IDLE = PacketProof.IDLE;
     private static final String[] START = {"java.lang.String", "java.lang.String", "long", "int"}, STOP = {"java.lang.String", "java.lang.String"};
     private static final List<String> TARGETS = List.of("net.minecraft.server.MinecraftServer", "net.minecraft.server.level.ServerLevel",
             "net.minecraft.server.level.ServerChunkCache", "net.minecraft.world.level.NaturalSpawner");
@@ -74,19 +74,19 @@ final class PhaseProof {
         long started = System.nanoTime();
         server.invoke(name, "start", new Object[]{"phases", "both", started, 60}, START);
         server.invoke(name, "start", new Object[]{"tracker", "both", started, 60}, START);
-        check("phases starting both at the next tick; tracker recording both".equals(server.getAttribute(name, "Status")),
+        check("phases starting both at the next tick; tracker recording both; packets available, idle".equals(server.getAttribute(name, "Status")),
                 "Both probes must record the same capture: " + server.getAttribute(name, "Status"));
         Map<?, ?> tracker = (Map<?, ?>) server.invoke(name, "stop", new Object[]{"tracker", "both"}, STOP);
         check("both".equals(tracker.get("captureId")) && tracker.get("tracker") instanceof Map, "Tracker stop through JMX failed: " + tracker);
-        check("phases starting both at the next tick; tracker available, idle".equals(server.getAttribute(name, "Status")),
+        check("phases starting both at the next tick; tracker available, idle; packets available, idle".equals(server.getAttribute(name, "Status")),
                 "Stopping the tracker must leave the phases capture: " + server.getAttribute(name, "Status"));
         Map<?, ?> phases = (Map<?, ?>) server.invoke(name, "stop", new Object[]{"phases", "both"}, STOP);
         check("both".equals(phases.get("captureId")) && "sneakydiagnostics.phases/1".equals(phases.get("schema")), "Phase stop through JMX failed: " + phases);
         try {
-            server.invoke(name, "start", new Object[]{"packets", "unknown", started, 60}, START);
+            server.invoke(name, "start", new Object[]{"bytes", "unknown", started, 60}, START);
             check(false, "An unknown probe name must be rejected");
         } catch (javax.management.RuntimeMBeanException e) {
-            check(e.getCause() instanceof IllegalArgumentException && e.getCause().getMessage().contains("Unknown server probe 'packets'"),
+            check(e.getCause() instanceof IllegalArgumentException && e.getCause().getMessage().contains("Unknown server probe 'bytes'"),
                     "Unknown probe rejected with the wrong error: " + e.getCause());
         }
         check(IDLE.equals(server.getAttribute(name, "Status")), "Server probes did not return to idle");

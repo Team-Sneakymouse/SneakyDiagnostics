@@ -26,6 +26,7 @@ public final class ServerControl implements ServerControlMBean {
         var probes = new LinkedHashMap<String, Probe>();
         probes.put("phases", new Probe(PhaseProbe::start, PhaseProbe::stop, PhaseProbe::status));
         probes.put("tracker", new Probe(TrackerProbe::start, TrackerProbe::stop, TrackerProbe::status));
+        probes.put("packets", new Probe(PacketProbe::start, PacketProbe::stop, PacketProbe::status));
         PROBES = Collections.unmodifiableMap(probes);
     }
 
@@ -52,7 +53,8 @@ public final class ServerControl implements ServerControlMBean {
     }
     /**
      * The probe's own map: {@code phases} returns the phases-1.json fields at top level; {@code tracker} returns
-     * {@code {captureId, tracker}}, its packets-1.json section under its name.
+     * {@code {captureId, tracker}}, its packets-1.json section under its name; {@code packets} returns
+     * {@code {captureId, outbound, causes, trackerCauses, inbound}}, its packets-1.json sections.
      */
     @Override public Map<String, Object> stop(String probe, String captureId) { return probe(probe).stop().apply(captureId); }
 

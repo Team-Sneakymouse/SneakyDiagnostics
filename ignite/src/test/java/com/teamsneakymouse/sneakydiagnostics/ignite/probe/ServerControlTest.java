@@ -11,7 +11,7 @@ class ServerControlTest {
 
     @AfterEach void stopLeftovers() {
         for (String probe : ServerControl.PROBES.keySet()) {
-            for (String id : List.of("shared", "phases-only", "tracker-only")) {
+            for (String id : List.of("shared", "phases-only", "tracker-only", "packets-only")) {
                 try { control.stop(probe, id); } catch (IllegalStateException ignored) { }
             }
         }
@@ -21,15 +21,15 @@ class ServerControlTest {
         long started = System.nanoTime();
         control.start("phases", "shared", started, 5);
         control.start("tracker", "shared", started, 5);
-        assertEquals("phases starting shared at the next tick; tracker recording shared", control.getStatus());
+        assertEquals("phases starting shared at the next tick; tracker recording shared; packets available, idle", control.getStatus());
 
         recordPhase();
         recordSend();
 
         var tracker = control.stop("tracker", "shared");
-        assertEquals("phases recording shared; tracker available, idle", control.getStatus(), "stopping one probe leaves the other");
+        assertEquals("phases recording shared; tracker available, idle; packets available, idle", control.getStatus(), "stopping one probe leaves the other");
         var phases = control.stop("phases", "shared");
-        assertEquals("phases available, idle; tracker available, idle", control.getStatus());
+        assertEquals("phases available, idle; tracker available, idle; packets available, idle", control.getStatus());
 
         assertEquals("shared", phases.get("captureId"));
         assertEquals("sneakydiagnostics.phases/1", phases.get("schema"));
@@ -59,11 +59,32 @@ class ServerControlTest {
         assertThrows(IllegalStateException.class, () -> control.stop("phases", "tracker-only"), "capture IDs are checked per probe");
     }
 
+    /** The packets collector starts the tracker and packets probes under one capture ID; each returns its own sections. */
+    @Test void trackerAndPacketsProbesRecordOneCaptureAndReturnTheirOwnSections() {
+        long started = System.nanoTime();
+        control.start("tracker", "shared", started, 5);
+        control.start("packets", "shared", started, 5);
+        assertEquals("phases available, idle; tracker recording shared; packets recording shared", control.getStatus());
+        recordSend();
+        var packets = PacketProbe.active();
+        assertNotNull(packets);
+        long now = System.nanoTime();
+        packets.sent(PacketProbe.slot(String.class), now, now + 500, packets.sendBegin());
+        var packetMap = control.stop("packets", "shared");
+        assertEquals("phases available, idle; tracker recording shared; packets available, idle", control.getStatus());
+        var tracker = control.stop("tracker", "shared");
+        assertEquals("shared", packetMap.get("captureId"));
+        assertEquals(List.of("captureId", "outbound", "causes", "trackerCauses", "inbound"), List.copyOf(packetMap.keySet()));
+        assertEquals(1L, map(packetMap, "outbound").get("sends"));
+        assertEquals(1L, map(tracker, "tracker").get("calls"));
+        assertFalse(tracker.containsKey("outbound"), "probes return only their own sections");
+    }
+
     @Test void unknownProbeNamesAreRejectedClearly() {
-        var start = assertThrows(IllegalArgumentException.class, () -> control.start("packets", "shared", System.nanoTime(), 5));
-        assertEquals("Unknown server probe 'packets'; known: phases, tracker", start.getMessage());
+        var start = assertThrows(IllegalArgumentException.class, () -> control.start("bytes", "shared", System.nanoTime(), 5));
+        assertEquals("Unknown server probe 'bytes'; known: phases, tracker, packets", start.getMessage());
         assertThrows(IllegalArgumentException.class, () -> control.stop(null, "shared"));
-        assertEquals("phases available, idle; tracker available, idle", control.getStatus(), "a rejected start starts nothing");
+        assertEquals("phases available, idle; tracker available, idle; packets available, idle", control.getStatus(), "a rejected start starts nothing");
         assertEquals(1, control.getProtocolVersion());
     }
 
