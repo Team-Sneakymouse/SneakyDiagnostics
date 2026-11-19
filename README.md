@@ -1,6 +1,6 @@
 # SneakyDiagnostics
 
-Paper 26.2+ and Velocity 3.4 diagnostics plugin for investigating server performance and connection issues. Java 25 is required. Collection is manual. Paper collectors cover connections, entities, the tick timeline, public scheduler state, registered plugin probes, optional spark profiles, and optional Ignite scheduler instrumentation. Velocity supports connection captures.
+Paper 26.2+ and Velocity 3.4 diagnostics plugin for investigating server performance and connection issues. Java 25 is required. Collection is manual. Paper collectors cover connections, entities, the tick timeline, public scheduler state, registered plugin probes, optional spark profiles, and optional Ignite scheduler and tick-phase instrumentation. Velocity supports connection captures.
 
 ## Build and install
 
@@ -12,14 +12,14 @@ Copy `plugin/build/libs/SneakyDiagnostics-<version>.jar` (not the sources JAR) t
 
 The same JAR also installs in Velocity's `plugins/` folder. It contains independent Paper and Velocity entry points and shared connection-reporting code; no separate proxy companion is needed. Install it in both processes to compare their observations. Velocity does not load the Paper collectors or require Ignite. Both processes must support Java 25.
 
-For scheduler execution and cancellation attribution, copy `ignite/build/libs/SneakyDiagnostics-Ignite-<version>.jar` to Ignite's `mods/` directory and restart. Keep only one companion version installed. Scheduler captures automatically include its measurements when available; status reports availability. The tested baseline is Paper 26.2 build 116 with Ignite 1.2.1. Later releases are accepted when the required hook contracts remain compatible, without an exact build-number gate. See the [companion documentation](ignite/README.md) for compatibility and runtime checks.
+For scheduler execution and cancellation attribution and for tick phases, copy `ignite/build/libs/SneakyDiagnostics-Ignite-<version>.jar` to Ignite's `mods/` directory and restart. Keep only one companion version installed. Scheduler captures automatically include its measurements when available, and the `phases` collector needs it; status reports availability. The tested baseline is Paper 26.2 build 116 with Ignite 1.2.1. Later releases are accepted when the required hook contracts remain compatible, without an exact build-number gate. See the [companion documentation](ignite/README.md) for compatibility and runtime checks.
 
 ## Repository layout
 
 ```text
 api/                      Provider interface (SneakyDiagnostics-API:<version>)
 plugin/                   Paper plugin, collectors, commands, and tests
-ignite/                   Optional Ignite scheduler Mixins and hook tests
+ignite/                   Optional Ignite scheduler and tick-phase Mixins and hook tests
 build.gradle.kts          Shared version, Java toolchain, and publishing
 settings.gradle.kts       Module registration
 .github/workflows/        One build/publishing workflow for all artifacts
@@ -36,6 +36,7 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 /diagnostics entities resume 120
 /diagnostics timeline start 60
 /diagnostics scheduler start 60
+/diagnostics phases start 60
 /diagnostics plugins start 60
 /diagnostics plugins start 60 MagicSpells Voice
 /diagnostics spark start 120
@@ -53,12 +54,13 @@ Root `build`, `check`, and `clean` cover all three modules. Use `:plugin:build` 
 | `/diagnostics entities` | `start [world] [seconds]` or `start [seconds]` | `sneakydiagnostics.entities` |
 | `/diagnostics timeline` | `start [seconds]` | `sneakydiagnostics.timeline` |
 | `/diagnostics scheduler` | `start [seconds]` | `sneakydiagnostics.scheduler` |
+| `/diagnostics phases` | `start [seconds]` | `sneakydiagnostics.phases` |
 | `/diagnostics plugins` | `start [seconds] [provider ...]` | `sneakydiagnostics.plugins` |
 | `/diagnostics spark` | `start [seconds]` | `sneakydiagnostics.spark` |
 | `/diagnostics connections` | `start [seconds] [player ...]` | `sneakydiagnostics.connections` |
 | `/diagnostics all` | `start [seconds] [world] [plugins=<provider>,<provider>]` | `sneakydiagnostics.all` |
 
-All Paper permissions default to operators. `sneakydiagnostics.all` includes the six individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
+All Paper permissions default to operators. `sneakydiagnostics.all` includes the seven individual permissions. `/entitycensus <start [world] [seconds]|resume [seconds]|status|stop>` remains available with the legacy `sneaky.entitycensus` permission. Omit the world to scan all currently loaded worlds; a world filter restricts only the entity collector. Numeric single arguments to entity start are interpreted as durations; specify a duration after a numeric world name to select it explicitly.
 
 `all start` validates every collector before starting, and shares a capture ID, timestamp, and monotonic clock across all reports. It rejects busy collectors, including pending report writes, and rolls back partial starts. Individual captures can overlap independently; starting or resuming another capture is blocked while a coordinated capture is still active. `all stop` stops all active collectors, including independently started ones. A census may finish before the requested time if it reaches the end of its traversal; timeline and scheduler collection continue for their full window.
 
@@ -104,7 +106,7 @@ CI follows SneakyDiscordLink's Infisical OIDC setup. The repository must have ac
 
 For publishing from a local checkout, supply Gradle properties `sneakyrpUsername` and `sneakyrpPassword` outside the repository (for example in the user Gradle properties file), then run `publishAll`. The original `publishMavenPublicationToSneakyrpRepository` command remains an alias that publishes the API, plugin and companion. Never commit credentials. Root `publishToMavenLocal` can verify all three publications without remote credentials.
 
-`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, `scheduler`, and `integration` own their collection state. The Paper plugin uses public APIs; the optional Ignite companion instruments scheduler internals. There is no automatic capture.
+`SneakyDiagnosticsPlugin` owns lifecycle and command routing. The `capture` package validates coordinated starts, shares capture identity and time, and serializes detached reports off the server thread. `entity`, `timeline`, `scheduler`, `phases`, and `integration` own their collection state. The Paper plugin uses public APIs; the optional Ignite companion instruments scheduler and tick internals. There is no automatic capture.
 
 The original entity fields, chunk groups, and `entities-*.json` filename pattern are preserved; capture identity, coverage, and sections are additive. Files now live in capture subdirectories; resumed files contain separate segments. Update collection/analysis scripts to discover those directories and combine segments rather than assuming one file is the entire census. Remove the old `SneakyEntityCensus` JAR when installing this plugin to avoid duplicate `/entitycensus` registrations.
 
@@ -219,6 +221,8 @@ The instrumented SneakyVoiceChat build registers a `voice-routing-1` provider wi
 ## Deeper probes
 
 With the companion installed, `/diagnostics scheduler start` and `/diagnostics all start` also capture task creation, sync/async runnable and consumer execution, callable execution, individual/plugin cancellation requests, repeated individual cancellation requests, and deferred cancellation scans. The scheduler report's `ignite` section groups these by owner, body class, sync flag, event, and cancellation caller. It includes started/completed/throwing counts, total/max duration, observation offsets, overflow counters, and unfinished scopes at stop. It also keeps the longest individual scheduler and event-listener calls of at least 1 ms with capture offsets and, on the server thread, the server tick, so slow ticks can be matched to them (see the [companion documentation](ignite/README.md#slow-calls-when-not-only-how-much)). Without the companion, public snapshots remain available.
+
+`/diagnostics phases start` (also part of `/diagnostics all start`) writes `phases-1.json`: for every server tick, the server-thread time of each tick phase in microseconds — tick-start tasks (inbound packets and queued tasks), the Bukkit scheduler, each world's entities, chunks, entity tracker, block entities, block events, natural spawning (mob-cap bookkeeping, per-chunk spawning and custom spawners separately, with call counters) and the rest of the world tick, connections, SneakyDiagnostics' own work, and the rest of the tick. Phases are exclusive (nested phases are subtracted), so with Paper's measured tick duration they add up exactly. It needs the companion; without it the report says the phases are unavailable. Details are in the [companion documentation](ignite/README.md#tick-phases) and the [schema](docs/report-schema-v2.md#tick-phases-phases-1json).
 
 Probe state is bounded to 2,048 groups and 100,000 entries in each task-identity/cancellation map, with labels capped at 192 characters. Hooks bypass aggregation outside captures; captures expire on their monotonic deadline even when no tick arrives. Execution durations are inclusive wall time, not CPU time. Cancellation requests do not count removed tasks, and request/deferred/execution scopes can overlap. Creation timing measures probe bookkeeping. Unknown targets can predate capture; a caller frame is evidence of a call site, not proven plugin ownership. Read report notes before comparing totals.
 
