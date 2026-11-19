@@ -17,7 +17,7 @@ API, plugin and Ignite companion share that version and are published together (
 
 ```kotlin
 repositories {
-    maven("https://maven.sneakyrp.com/releases")
+    maven("https://maven.sneakyrp.com/sneakymouse")
 }
 dependencies {
     compileOnly("io.github.team-sneakymouse:SneakyDiagnostics-API:<version>")
