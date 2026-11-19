@@ -49,7 +49,9 @@ class PhasesCollectorTest {
         assertEquals(true, sink.report.get("available"));
         assertEquals(true, sink.report.get("phasesComplete"));
         assertEquals(true, sink.report.get("complete"));
-        assertEquals(Map.of("scheduler", List.of(1000)), sink.report.get("phases"));
+        // The companion exports phase columns as int[]; the report serializer writes them as JSON arrays.
+        String json = new String(com.teamsneakymouse.sneakydiagnostics.report.StoredFile.serialize(sink.report)).replaceAll("\\s", "");
+        assertTrue(json.contains("\"phases\":{\"scheduler\":[1000]}"), json);
         assertEquals("shared", sink.report.get("captureId"), "the header's capture ID is kept");
         assertFalse(sink.report.containsKey("tracker"), "only the phases key belongs to this report");
     }
@@ -107,7 +109,7 @@ class PhasesCollectorTest {
         int seconds, protocol = 1;
         boolean fail;
         final Map<String, Object> phases = new LinkedHashMap<>(Map.of("schema", "sneakydiagnostics.phases/1", "captureId", "ignored",
-                "complete", true, "phases", Map.of("scheduler", List.of(1000))));
+                "complete", true, "phases", Map.of("scheduler", new int[]{1000})));
         @Override public Object getAttribute(String name) { return name.equals("ProtocolVersion") ? protocol : "phases available, idle"; }
         @Override public void setAttribute(Attribute attribute) { throw new UnsupportedOperationException(); }
         @Override public AttributeList getAttributes(String[] names) { return new AttributeList(); }

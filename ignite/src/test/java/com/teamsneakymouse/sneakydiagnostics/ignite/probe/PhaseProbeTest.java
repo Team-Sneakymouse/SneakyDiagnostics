@@ -34,6 +34,7 @@ class PhaseProbeTest {
     private static List<Object> list(Map<String, Object> map, String... path) {
         Object value = map;
         for (String key : path) value = ((Map<String, Object>) value).get(key);
+        if (value instanceof int[] column) return java.util.Arrays.stream(column).boxed().map(Object.class::cast).toList();
         return (List<Object>) value;
     }
     @SuppressWarnings("unchecked")
@@ -80,7 +81,7 @@ class PhaseProbeTest {
         assertEquals(1_000, list(report, "phases", "level.world.other").get(0));
         assertEquals(1_500, list(report, "phases", "connections").get(0));
         assertFalse(phases.containsKey("level.world.spawning.spawn"), "a phase that never ran is absent");
-        long sum = phases.values().stream().mapToLong(values -> ((Number) ((List<?>) values).get(0)).longValue()).sum();
+        long sum = phases.values().stream().mapToLong(values -> ((int[]) values)[0]).sum();
         assertEquals(21_000 - sum, ((Number) list(report, "other").get(0)).longValue());
         assertEquals(1_250, list(report, "other").get(0), "0.5 ms before the tasks and 0.75 ms before tick end");
         assertNull(list(report, "other").get(1), "the last tick was stopped before Paper measured it");

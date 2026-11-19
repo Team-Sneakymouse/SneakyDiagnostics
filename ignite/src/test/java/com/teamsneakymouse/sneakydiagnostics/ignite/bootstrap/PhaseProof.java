@@ -142,6 +142,7 @@ final class PhaseProof {
     private static long first(Map<?, ?> map, String... path) {
         Object value = map;
         for (String key : path) value = ((Map<?, ?>) value).get(key);
+        if (value instanceof int[] column && column.length > 0) return column[0];
         check(value instanceof List<?> list && !list.isEmpty(), "Missing " + String.join(".", path));
         return ((Number) ((List<?>) value).getFirst()).longValue();
     }

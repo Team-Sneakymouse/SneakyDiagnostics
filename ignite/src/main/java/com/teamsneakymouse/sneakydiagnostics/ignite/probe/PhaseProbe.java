@@ -337,10 +337,9 @@ public final class PhaseProbe {
                 total.put("insideMeasuredTick", insideMeasured(slot));
                 totals.put((insideMeasured(slot) ? "" : "outside.") + name, total);
                 if (columnOmitted[slot]) { omittedSeries.add(name); continue; }
-                List<Object> values = new ArrayList<>(count);
+                // A detached primitive copy: no boxing on the server thread (Gson writes int[] as a JSON array).
                 int[] column = columns[slot];
-                for (int i = 0; i < count; i++) values.add(column == null ? 0 : column[i]);
-                (insideMeasured(slot) ? inside : outside).put(name, values);
+                (insideMeasured(slot) ? inside : outside).put(name, column == null ? new int[count] : Arrays.copyOf(column, count));
             }
             List<Object> tickList = new ArrayList<>(count), startList = new ArrayList<>(count),
                     measuredList = new ArrayList<>(count), otherList = new ArrayList<>(count);
