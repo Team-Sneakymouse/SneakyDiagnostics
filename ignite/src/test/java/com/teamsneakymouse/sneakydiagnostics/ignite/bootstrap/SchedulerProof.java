@@ -139,9 +139,9 @@ public final class SchedulerProof {
         check(handlers.stream().anyMatch(n -> n.endsWith("diagnostics$metadata")), "sendDirtyEntityData hook not applied: " + handlers);
         if (pluginJar == null) return;
         try (var loader = new java.net.URLClassLoader(new java.net.URL[]{java.nio.file.Path.of(pluginJar).toUri().toURL()}, SchedulerProof.class.getClassLoader())) {
-            Class<?> type = Class.forName("com.teamsneakymouse.sneakydiagnostics.packets.IgniteServerProbe", true, loader);
-            var constructor = type.getDeclaredConstructor(); constructor.setAccessible(true);
-            Object bridge = constructor.newInstance();
+            Class<?> type = Class.forName("com.teamsneakymouse.sneakydiagnostics.serverprobe.IgniteServerProbe", true, loader);
+            var constructor = type.getConstructor(String.class);
+            Object bridge = constructor.newInstance("tracker");
             var available = type.getDeclaredMethod("available"); available.setAccessible(true);
             check(Boolean.TRUE.equals(available.invoke(bridge)), "Plugin classloader cannot see the server bridge");
             Class<?> contextType = Class.forName("com.teamsneakymouse.sneakydiagnostics.capture.CaptureContext", true, loader);

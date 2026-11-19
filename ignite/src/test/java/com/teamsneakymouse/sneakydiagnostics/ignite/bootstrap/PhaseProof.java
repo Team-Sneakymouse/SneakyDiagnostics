@@ -131,9 +131,9 @@ final class PhaseProof {
     /** The plugin's phases bridge, in its own classloader with no companion classes, starts and stops a phase capture. */
     static void checkPluginBridge(String path) throws Exception {
         try (var loader = new java.net.URLClassLoader(new java.net.URL[]{java.nio.file.Path.of(path).toUri().toURL()}, PhaseProof.class.getClassLoader())) {
-            Class<?> type = Class.forName("com.teamsneakymouse.sneakydiagnostics.phases.IgniteServerProbe", true, loader);
-            var constructor = type.getDeclaredConstructor(); constructor.setAccessible(true);
-            Object bridge = constructor.newInstance();
+            Class<?> type = Class.forName("com.teamsneakymouse.sneakydiagnostics.serverprobe.IgniteServerProbe", true, loader);
+            var constructor = type.getConstructor(String.class);
+            Object bridge = constructor.newInstance("phases");
             var available = type.getDeclaredMethod("available"); available.setAccessible(true);
             check(Boolean.TRUE.equals(available.invoke(bridge)), "Plugin classloader cannot see the server probe protocol");
             Class<?> contextType = Class.forName("com.teamsneakymouse.sneakydiagnostics.capture.CaptureContext", true, loader);

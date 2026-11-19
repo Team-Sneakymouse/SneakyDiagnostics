@@ -2,6 +2,7 @@ package com.teamsneakymouse.sneakydiagnostics.packets;
 
 import com.teamsneakymouse.sneakydiagnostics.capture.CaptureContext;
 import com.teamsneakymouse.sneakydiagnostics.capture.ReportSink;
+import com.teamsneakymouse.sneakydiagnostics.serverprobe.IgniteServerProbe;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,7 +23,7 @@ class PacketCollectorTest {
 
     @Test void missingCompanionWritesAnIncompleteReportWithoutATrackerSection() {
         var sink = new Sink();
-        var collector = new PacketCollector(LOG, sink, new IgniteServerProbe(MBeanServerFactory.newMBeanServer()));
+        var collector = new PacketCollector(LOG, sink, new IgniteServerProbe("tracker", MBeanServerFactory.newMBeanServer()));
         assertTrue(collector.status().contains("unavailable"));
         collector.start(new CaptureContext("shared", "now", System.nanoTime(), 1, 60), List.of());
         collector.stop("completed");
@@ -36,7 +37,7 @@ class PacketCollectorTest {
         var server = MBeanServerFactory.newMBeanServer();
         var control = register(server, Map.of("complete", true, "calls", 3L));
         var sink = new Sink();
-        var collector = new PacketCollector(LOG, sink, new IgniteServerProbe(server));
+        var collector = new PacketCollector(LOG, sink, new IgniteServerProbe("tracker", server));
         collector.start(new CaptureContext("shared", "now", 12345, 1, 60), List.of());
         assertEquals("shared", control.id);
         assertEquals(12345L, control.startedNanos);
@@ -61,7 +62,7 @@ class PacketCollectorTest {
         var server = MBeanServerFactory.newMBeanServer();
         register(server, Map.of("complete", true));
         var sink = new Sink();
-        var collector = new PacketCollector(LOG, sink, new IgniteServerProbe(server));
+        var collector = new PacketCollector(LOG, sink, new IgniteServerProbe("tracker", server));
         collector.start(new CaptureContext("shared", "now", System.nanoTime() - 2_000_000_000L, 1, 1), List.of());
         collector.onTick(null);
         assertFalse(collector.active());
@@ -71,7 +72,7 @@ class PacketCollectorTest {
     @Test void incompatibleProtocolIsUnavailable() throws Exception {
         var server = MBeanServerFactory.newMBeanServer();
         register(server, Map.of()).protocol = 2;
-        var bridge = new IgniteServerProbe(server);
+        var bridge = new IgniteServerProbe("tracker", server);
         assertFalse(bridge.available());
         assertTrue(bridge.status().contains("incompatible"));
     }

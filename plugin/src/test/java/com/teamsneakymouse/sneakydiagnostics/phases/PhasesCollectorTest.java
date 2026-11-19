@@ -2,6 +2,7 @@ package com.teamsneakymouse.sneakydiagnostics.phases;
 
 import com.teamsneakymouse.sneakydiagnostics.capture.CaptureContext;
 import com.teamsneakymouse.sneakydiagnostics.capture.ReportSink;
+import com.teamsneakymouse.sneakydiagnostics.serverprobe.IgniteServerProbe;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -23,7 +24,7 @@ class PhasesCollectorTest {
 
     @Test void withoutTheCompanionTheReportSaysUnavailable() {
         var sink = new Sink();
-        var collector = new PhasesCollector(LOGGER, sink, new IgniteServerProbe(MBeanServerFactory.newMBeanServer()));
+        var collector = new PhasesCollector(LOGGER, sink, new IgniteServerProbe("phases", MBeanServerFactory.newMBeanServer()));
         collector.start(context(60), List.of());
         assertTrue(collector.active());
         assertTrue(collector.status().contains("unavailable"));
@@ -39,7 +40,7 @@ class PhasesCollectorTest {
         var server = MBeanServerFactory.newMBeanServer();
         var control = register(server);
         var sink = new Sink();
-        var collector = new PhasesCollector(LOGGER, sink, new IgniteServerProbe(server));
+        var collector = new PhasesCollector(LOGGER, sink, new IgniteServerProbe("phases", server));
         collector.start(context(60), List.of());
         assertEquals("shared", control.id);
         assertEquals(60, control.seconds);
@@ -59,7 +60,7 @@ class PhasesCollectorTest {
         var server = MBeanServerFactory.newMBeanServer();
         register(server);
         var sink = new Sink();
-        var collector = new PhasesCollector(LOGGER, sink, new IgniteServerProbe(server));
+        var collector = new PhasesCollector(LOGGER, sink, new IgniteServerProbe("phases", server));
         collector.start(new CaptureContext("shared", "now", System.nanoTime() - 2_000_000_000L, 4, 1), List.of());
         collector.onTick(null);
         assertFalse(collector.active());
@@ -71,7 +72,7 @@ class PhasesCollectorTest {
         var control = register(server);
         control.phases.put("complete", false);
         var sink = new Sink();
-        var collector = new PhasesCollector(LOGGER, sink, new IgniteServerProbe(server));
+        var collector = new PhasesCollector(LOGGER, sink, new IgniteServerProbe("phases", server));
         collector.start(context(60), List.of());
         collector.stop("completed");
         assertEquals(false, sink.report.get("complete"));
@@ -86,7 +87,7 @@ class PhasesCollectorTest {
     @Test void bridgeRejectsAnotherProtocol() throws Exception {
         var server = MBeanServerFactory.newMBeanServer();
         var control = register(server);
-        var bridge = new IgniteServerProbe(server);
+        var bridge = new IgniteServerProbe("phases", server);
         assertTrue(bridge.available());
         assertEquals("Ignite phases available, idle", bridge.status(), "only this probe's part of the status");
         control.status = "tracker available, idle";

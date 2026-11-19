@@ -4,6 +4,7 @@ import com.destroystokyo.paper.event.server.ServerTickEndEvent;
 import com.teamsneakymouse.sneakydiagnostics.capture.CaptureContext;
 import com.teamsneakymouse.sneakydiagnostics.capture.DiagnosticCollector;
 import com.teamsneakymouse.sneakydiagnostics.capture.ReportSink;
+import com.teamsneakymouse.sneakydiagnostics.serverprobe.IgniteServerProbe;
 import java.util.List;
 import java.util.Map;
 import java.util.logging.Level;
@@ -26,7 +27,7 @@ public final class PacketCollector implements DiagnosticCollector, Listener {
     private boolean igniteActive;
     private String igniteAvailability;
 
-    public PacketCollector(Logger logger, ReportSink reports) { this(logger, reports, new IgniteServerProbe()); }
+    public PacketCollector(Logger logger, ReportSink reports) { this(logger, reports, new IgniteServerProbe("tracker")); }
     PacketCollector(Logger logger, ReportSink reports, IgniteServerProbe ignite) { this.logger = logger; this.reports = reports; this.ignite = ignite; }
 
     @Override public String name() { return "packets"; }

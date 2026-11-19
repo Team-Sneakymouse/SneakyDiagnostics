@@ -4,6 +4,7 @@ import com.destroystokyo.paper.event.server.ServerTickEndEvent;
 import com.teamsneakymouse.sneakydiagnostics.capture.CaptureContext;
 import com.teamsneakymouse.sneakydiagnostics.capture.DiagnosticCollector;
 import com.teamsneakymouse.sneakydiagnostics.capture.ReportSink;
+import com.teamsneakymouse.sneakydiagnostics.serverprobe.IgniteServerProbe;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -28,7 +29,7 @@ public final class PhasesCollector implements DiagnosticCollector, Listener {
     private boolean probeActive;
     private String availability;
 
-    public PhasesCollector(Logger logger, ReportSink reports) { this(logger, reports, new IgniteServerProbe()); }
+    public PhasesCollector(Logger logger, ReportSink reports) { this(logger, reports, new IgniteServerProbe("phases")); }
     PhasesCollector(Logger logger, ReportSink reports, IgniteServerProbe probe) {
         this.logger = logger;
         this.reports = reports;
